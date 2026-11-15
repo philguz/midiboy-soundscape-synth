@@ -20,11 +20,11 @@ Status: ✅ done · 🟡 drafted, not compiled or tested · ⬜ not started
 | Encoder in the main loop, naked-asm UART ISR (~40 cycles per frame) | The ISR runs at 125 kHz, so it has to be minimal. |
 | `MidiboyDisplay` and `MidiboyInput` directly, no Arduboy2 or `Midiboy` global | No 1 KB frame buffer, and `Serial` is never linked, so the UART vector stays free. |
 | No EEPROM use for now | EEPROM is shared with the Sequencer's pattern slots on the same device. |
-| Fallback setting `UART_AUDIO_UBRR 2` (833 kbaud, 5 frames per sample) | Less CPU, and gentler on a slow MIDI OUT driver. About 6 dB more noise. |
+| Encoder: 8-bit noise shaper in 1/8 level units, asm unrolled for 8 frames, 256 B flash quantiser table, ±½ level dither | ~21 cycles per frame (the C version took ~70 and starved the loop). Simulated: same noise as the 16-bit version up to −6 dB input. Fixes the rate at 1.25 Mbaud. |
+| Our own sample loop instead of Mozzi's `audioHook()` | In custom mode the hook only adds a 64-bit sample counter, ~80 cycles a sample. Mozzi still does the synthesis. |
 
-CPU budget per sample (1280 cycles at 20 MHz): the ISR takes about 320 and the encoder about 200,
-which leaves roughly 740 for synthesis and UI. Synthesis is estimated at about 600. It's tight, so
-measure it (step 2).
+CPU budget per sample (1280 cycles at 20 MHz), measured in step 2: the fixed part (ISR, encoder,
+loop) takes ~36 %, so ~620 cycles of wall time per sample remain for synthesis with ~15 % left for UI.
 
 ## Steps
 
@@ -71,11 +71,27 @@ measure it (step 2).
       ground → line in. About −16 dB with a 10 kΩ input, corners about 6 kHz. Attenuate in
       the cable, not in code: scaling down in code keeps the hiss and loses SNR.
 
-### Step 2: Mozzi in custom output mode ⬜
-- [ ] `MozziConfig.h` (🟡) plus a one-oscillator sketch through `audioHook()`. Check the pitch
-      correction.
-- [ ] Add a CPU meter: count idle loop passes and show them on screen or in a debug
-      define, so every later layer gets measured.
+### Step 2: Mozzi in custom output mode ✅
+- [x] Sketch (the main `.ino` for now): Mozzi `Oscil` sines through `audioHook()`,
+      the loop calls `updateControl()`/`updateAudio()` and `UartAudioOut::write()` itself. Peak −12 dB. Builds to 7.4 KB flash and 465 B RAM, with
+      only the Timer0 and UART interrupts. The tone test is in git (`21bed91`).
+- [x] Pitch correction moved to `src/audio/Tuning.h` (`tuneHz()`, `TUNE_EXTRA`,
+      `CONTROL_HZ`), shared with the engine.
+- [x] On hardware: B toggles the correction. ON reads 440 Hz, OFF 420 Hz ✓.
+- [x] CPU meter: Timer1 (free in custom mode) counts CPU cycles around each
+      `audioHook()` batch. The screen shows AUDIO % (share of time spent making
+      audio, including the UART interrupt meanwhile) and CYC per sample (budget 1280).
+      UP/DOWN sums 1..8 oscillators as a load test.
+- [x] First hardware run: AUDIO 94 %, CYC 1133, FILL 0 with a dropout 4 times a second
+      (each status redraw). The C encoder took ~70 cycles per frame, Mozzi's `audioHook()`
+      another ~80 per sample. Rewrote the encoder (see key decisions) and dropped `audioHook()`.
+- [x] On hardware with the new encoder: clean tone, no dropouts up to 6 oscillators.
+      1 oscillator: AUDIO 46 %, CYC 555. 8 oscillators: 97 %, 1174 (dropouts at 7–8: overload,
+      as expected). Each `Oscil` in the array loop costs ~88 cycles of wall time.
+- Budget for step 3: the fixed part (UART interrupt + encoder + loop) is ~36 % of the CPU. Keeping
+  ~15 % for the UI leaves **~620 cycles of wall time per sample for synthesis** (~450 of CPU work,
+  since the interrupt takes 28 % of all time). That's ~7 of these oscillators, so every layer
+  must be lean. Possible savings if needed: dither random numbers in asm (~30 per sample).
 
 ### Step 3: Soundscape engine, one layer at a time ⬜ (`Soundscape.*`, `Scales.*` 🟡)
 Measure CPU after each layer.

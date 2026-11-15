@@ -17,20 +17,11 @@
 //
 // The UART's receiver stays off, so MIDI IN is ignored while audio runs.
 
-// UBRR0 with U2X0 set: baud = F_CPU / (8 * (UBRR + 1)).
-// 1 -> 1.25 Mbaud (default). 2 -> 833 kbaud: less CPU (frames are 5 per
-// sample there) and kinder to slow MIDI OUT drivers, but ~6 dB more noise.
-#ifndef UART_AUDIO_UBRR
+// UBRR0 with U2X0 set: baud = F_CPU / (8 * (UBRR + 1)) = 1.25 Mbaud.
+// The encoder is unrolled for exactly 8 frames per sample, and the ring
+// relies on 256 being a multiple of 8, so this is fixed.
 #define UART_AUDIO_UBRR 1
-#endif
-
-#if UART_AUDIO_UBRR == 1
 #define UART_AUDIO_FRAMES_PER_SAMPLE 8
-#elif UART_AUDIO_UBRR == 2
-#define UART_AUDIO_FRAMES_PER_SAMPLE 5
-#else
-#error "UART_AUDIO_UBRR must be 1 or 2"
-#endif
 
 #define UART_AUDIO_SAMPLE_RATE \
   (F_CPU / 8UL / (UART_AUDIO_UBRR + 1) / 10UL / UART_AUDIO_FRAMES_PER_SAMPLE)
@@ -41,12 +32,10 @@
 
 extern volatile uint8_t g_uartAudioWriteIndex;
 
-// TPDF dither of +-1 frame level before the quantiser. Without it the noise
+// Dither of +-1/2 frame level before the quantiser. Without it the noise
 // shaper can lock into a repeating pattern on silence or steady input, which
 // is heard as a high whistle (simulated: up to -22 dB at ~11.7, 15.6 or
-// 19.5 kHz). With it the whistle drops below -45 dB, but the steady hiss
-// rises ~5 dB and frames at the very loudest peaks may hit the rails.
-// Costs ~15 cycles per frame.
+// 19.5 kHz). With it the whistle stays below -45 dB. Off = plain rounding.
 extern bool g_uartAudioDither;
 
 namespace UartAudioOut {
@@ -61,7 +50,7 @@ namespace UartAudioOut {
     return freeBytes >= UART_AUDIO_FRAMES_PER_SAMPLE;
   }
 
-  // Encodes one sample (-2048..2047, clipped) into the ring. Only call it
-  // when canWrite() is true.
+  // Encodes one sample (-2048..2047, clipped) into the ring: ~240 cycles.
+  // Only call it when canWrite() is true.
   void write(int16_t sample);
 }

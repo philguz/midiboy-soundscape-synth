@@ -1,22 +1,13 @@
 #include "Soundscape.h"
 #include "Scales.h"
 #include "../audio/UartAudioOut.h"
+#include "../audio/Tuning.h"
 
 #include <mozzi_rand.h>
 #include <mozzi_midi.h>
 #include <mult16x8.h>
 #include <tables/sin256_int8.h>
 #include <tables/saw256_int8.h>
-
-// Control ticks per real second (Mozzi counts ticks against its nominal
-// 16384 Hz audio rate; the UART really runs at 15625 Hz).
-#define CONTROL_HZ ((uint32_t)MOZZI_CONTROL_RATE * UART_AUDIO_SAMPLE_RATE / MOZZI_AUDIO_RATE)
-
-// Pitch correction for the same reason: Mozzi oscillators play
-// MOZZI_AUDIO_RATE / UART_AUDIO_SAMPLE_RATE flat, so frequencies are raised
-// by that ratio. TUNE_EXTRA is (ratio - 1) in 1/65536ths.
-#define TUNE_EXTRA \
-  ((uint32_t)((65536ULL * MOZZI_AUDIO_RATE + UART_AUDIO_SAMPLE_RATE / 2) / UART_AUDIO_SAMPLE_RATE) - 65536UL)
 
 static const uint8_t DEFAULT_PARAMS[PARAM_COUNT] = {
   0,    // MOOD: penta minor
@@ -50,10 +41,6 @@ static inline int16_t mulShr8(int16_t a, uint8_t b) {
   int16_t result;
   MultiSU16X8toH16(result, a, b);
   return result;
-}
-
-static Q16n16 tuneHz(Q16n16 hz) {
-  return hz + (((hz >> 8) * TUNE_EXTRA) >> 8);
 }
 
 static Q16n16 noteHz(uint8_t note) {

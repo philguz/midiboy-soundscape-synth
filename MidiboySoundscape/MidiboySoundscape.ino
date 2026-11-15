@@ -1,41 +1,43 @@
 // Midiboy Soundscape: random soundscape generator, audio out of DIN MIDI OUT.
 //
-// Step 1 sketch: a test tone through UartAudioOut, without Mozzi. It proves
-// that audio comes out of the MIDI OUT port and lets you check the pitch,
-// level and noise floor from the buttons, without reflashing.
-//
-// Wiring (TRS Type A adapter): tip = DIN pin 5 = audio, sleeve = DIN pin 2 =
-// ground. The ring is DIN pin 4, which sits at +5 V through a resistor: DC,
-// no audio. Start with a line input at low gain.
+// Step 2 sketch: Mozzi in MOZZI_OUTPUT_EXTERNAL_CUSTOM mode. Mozzi generates
+// the samples (Oscil, updateAudio()); UartAudioOut sends them out of MIDI OUT.
+// Checks the pitch correction and measures how much CPU the audio path takes.
 //
 // Buttons:
 //   LEFT / RIGHT  frequency, in octaves (55 Hz .. 7040 Hz)
-//   UP / DOWN     level, in 6 dB steps (0 dB = full scale, about 3 Vpp)
-//   A             mode: tone -> sweep (55 Hz .. 7 kHz, 10 s) -> silence
-//   B             dither on / off (see UartAudioOut.h). Compare in silence:
-//                 off can whistle, on is a steady hiss.
+//   UP / DOWN     oscillators, 1..8 (harmonics 1..N, summed): a CPU load test
+//   A             mute on / off
+//   B             pitch correction on / off. Off plays 16384/15625 flat:
+//                 440 Hz comes out as 420 Hz (0.82 semitones low).
 //
-// The bottom row shows how full the audio ring was at its lowest since the
-// last update. 0 means a dropout (the interrupt ran out of data).
+// Screen, updated 4 times a second:
+//   AUDIO  share of time the main loop spends making audio (Mozzi synthesis
+//          plus the UartAudioOut encoder, including the UART interrupt
+//          firing meanwhile). What's left is for the UI. 100% = can't keep up.
+//   CYC    the same as CPU cycles per sample. The budget is 1280.
+//   FILL   lowest ring fill since the last update. 0 = a dropout.
+//
+// Output peaks at -12 dB (+-512 of +-2048): the line input clips above that.
+
+#include "src/MozziConfig.h"
+#include <Mozzi.h>
+#include <Oscil.h>
+#include <tables/sin2048_int8.h>
 
 #include <MidiboyDisplay.h>
 #include <MidiboyInput.h>
 #include <MidiboyFonts.h>
 #include "src/audio/UartAudioOut.h"
-
-#define SINE_TABLE_BITS 8
-#define SINE_TABLE_SIZE (1 << SINE_TABLE_BITS)
-#define SINE_AMPLITUDE 2047
+#include "src/audio/Tuning.h"
 
 #define FREQ_COUNT 8
 #define FREQ_DEFAULT 3          // 440 Hz
-#define LEVEL_STEPS 9           // 0 .. -48 dB
-#define LEVEL_DEFAULT 2         // -12 dB, about 0.75 Vpp: consumer line level
+#define OSC_MAX 8
 
-#define SWEEP_LOW_HZ 55.0f
-#define SWEEP_HIGH_HZ 7040.0f
-#define SWEEP_STEP_MS 10
-#define SWEEP_FACTOR 1.0048578f  // (7040 / 55) ^ (1 / 1000): 10 s per sweep
+// Samples per audioHook() batch, at most. The ring holds 32 samples (2 ms),
+// so this also bounds one batch below 65536 cycles for the Timer1 meter.
+#define AUDIO_BATCH_MAX 32
 
 #define STATUS_MS 250
 #define CHAR_WIDTH 6
@@ -43,63 +45,90 @@
 enum Row : uint8_t {
   ROW_TITLE = 0,
   ROW_FREQ = 2,
-  ROW_LEVEL = 3,
-  ROW_MODE = 4,
-  ROW_DITHER = 5,
+  ROW_OSC = 3,
+  ROW_TUNE = 4,
+  ROW_LOAD = 5,
   ROW_FILL = 6,
   ROW_HELP = 7
 };
 
 static const uint16_t FREQUENCIES[FREQ_COUNT] = {55, 110, 220, 440, 880, 1760, 3520, 7040};
 
+// Right shift after summing N int8 voices (<< 2), so the peak stays within
+// +-512, i.e. -12 dB.
+static const uint8_t SUM_SHIFT[OSC_MAX + 1] = {0, 0, 1, 2, 2, 3, 3, 3, 3};
+
 static MidiboyDisplay display;
 static MidiboyInput input;
 
-// One extra entry, so interpolation can read index + 1 without wrapping.
-static int16_t sineTable[SINE_TABLE_SIZE + 1];
-
-static uint32_t phase;
-static uint32_t phaseStep;
-static float sweepHz;
+static Oscil<SIN2048_NUM_CELLS, MOZZI_AUDIO_RATE> oscillators[OSC_MAX];
 
 static uint8_t freqIndex = FREQ_DEFAULT;
-static uint8_t levelShift = LEVEL_DEFAULT;
-enum Mode : uint8_t {
-  MODE_TONE,
-  MODE_SWEEP,
-  MODE_SILENCE,
-  MODE_COUNT
-};
-static uint8_t mode = MODE_TONE;
+static uint8_t oscCount = 1;
+static bool muted;
+static bool tuned = true;
 
 static uint8_t minFill = 255;
 static uint8_t shownMinFill;
-static uint8_t dirtyRows = 0xFF;
-static unsigned long lastSweepMs;
+static uint32_t busyCycles;
+static uint16_t busySamples;
+static uint8_t shownLoad;
+static uint16_t shownCycles;
+static unsigned long windowStartUs;
 static unsigned long lastStatusMs;
+static uint8_t dirtyRows = 0xFF;
 
-// --- Audio -----------------------------------------------------------------
+// --- Mozzi hooks -------------------------------------------------------------
+//
+// The loop calls updateControl() and updateAudio() itself instead of Mozzi's
+// audioHook(): in custom output mode the hook adds nothing but a 64-bit
+// sample counter (audioTicks / mozziMicros, unused here), ~80 cycles a sample.
+// Mozzi still needs these two defined, since its audioHook() is compiled in.
 
-static void buildSineTable() {
-  for(uint16_t i = 0; i <= SINE_TABLE_SIZE; i++) {
-    sineTable[i] = (int16_t)lroundf(SINE_AMPLITUDE * sinf(i * (2.0f * PI / SINE_TABLE_SIZE)));
+// Samples per updateControl(), as Mozzi would: 16384 / 128.
+#define CONTROL_PERIOD (MOZZI_AUDIO_RATE / MOZZI_CONTROL_RATE)
+static uint8_t controlCountdown = 1;
+
+inline bool canBufferAudioOutput() {
+  return UartAudioOut::canWrite();
+}
+
+void audioOutput(const AudioOutput f) {
+  UartAudioOut::write(f.l());
+}
+
+void updateControl() {
+}
+
+AudioOutput updateAudio() {
+  int16_t sum = 0;
+  for(uint8_t i = 0; i < oscCount; i++) {
+    sum += oscillators[i].next();
+  }
+  if(muted) {
+    return MonoOutput(0);
+  }
+  return MonoOutput((sum << 2) >> SUM_SHIFT[oscCount]);
+}
+
+// --- Audio -------------------------------------------------------------------
+
+static void setFrequencies() {
+  Q16n16 base = (Q16n16)FREQUENCIES[freqIndex] << 16;
+  if(tuned) {
+    base = tuneHz(base);
+  }
+  for(uint8_t i = 0; i < OSC_MAX; i++) {
+    oscillators[i].setFreq_Q16n16(base * (i + 1));
   }
 }
 
-static void setFrequency(float hz) {
-  phaseStep = (uint32_t)(hz * (4294967296.0f / UART_AUDIO_SAMPLE_RATE));
-}
-
-// Linear interpolation between table entries: about -80 dB of error, well
-// below the output's own noise, so what you hear is the output, not the table.
-static int16_t nextSample() {
-  phase += phaseStep;
-  uint8_t index = phase >> 24;
-  uint8_t fraction = phase >> 16;
-  int16_t a = sineTable[index];
-  int16_t b = sineTable[index + 1];
-  int16_t sample = a + (int16_t)(((int32_t)(b - a) * fraction) >> 8);
-  return mode == MODE_SILENCE ? 0 : sample >> levelShift;
+// Timer1 is free (Mozzi claims no timer in custom mode). Free-running at the
+// CPU clock, it counts cycles; one batch is well under its 65536 wrap.
+static void startCycleCounter() {
+  TCCR1A = 0;
+  TCCR1B = _BV(CS10);
+  TIMSK1 = 0;
 }
 
 static void fillAudio() {
@@ -107,12 +136,36 @@ static void fillAudio() {
   if(fill < minFill) {
     minFill = fill;
   }
-  while(UartAudioOut::canWrite()) {
-    UartAudioOut::write(nextSample());
+  uint16_t start = TCNT1;
+  uint8_t count = 0;
+  while(count < AUDIO_BATCH_MAX && UartAudioOut::canWrite()) {
+    if(--controlCountdown == 0) {
+      controlCountdown = CONTROL_PERIOD;
+      updateControl();
+    }
+    UartAudioOut::write(updateAudio().l());
+    count++;
+  }
+  if(count != 0) {
+    busyCycles += (uint16_t)(TCNT1 - start);
+    busySamples += count;
   }
 }
 
-// --- Screen ----------------------------------------------------------------
+// Turns the window's counts into the numbers on screen.
+static void updateMeter() {
+  unsigned long now = micros();
+  uint32_t elapsedCycles = (now - windowStartUs) * (F_CPU / 1000000UL);
+  windowStartUs = now;
+  shownLoad = elapsedCycles != 0 ? (uint8_t)((busyCycles * 100) / elapsedCycles) : 0;
+  shownCycles = busySamples != 0 ? (uint16_t)(busyCycles / busySamples) : 0;
+  busyCycles = 0;
+  busySamples = 0;
+  shownMinFill = minFill;
+  minFill = 255;
+}
+
+// --- Screen ------------------------------------------------------------------
 
 static uint8_t textX;
 
@@ -134,18 +187,13 @@ static void drawText_P(const char* text) {
 }
 
 // Right-aligned in `width` characters.
-static void drawNumber(int16_t value, uint8_t width) {
-  char digits[7];
+static void drawNumber(uint16_t value, uint8_t width) {
+  char digits[6];
   uint8_t count = 0;
-  bool negative = value < 0;
-  uint16_t magnitude = negative ? -value : value;
   do {
-    digits[count++] = '0' + magnitude % 10;
-    magnitude /= 10;
-  } while(magnitude > 0);
-  if(negative) {
-    digits[count++] = '-';
-  }
+    digits[count++] = '0' + value % 10;
+    value /= 10;
+  } while(value > 0);
   for(uint8_t i = count; i < width; i++) {
     drawChar(' ', false);
   }
@@ -154,59 +202,53 @@ static void drawNumber(int16_t value, uint8_t width) {
   }
 }
 
-static void beginRow(uint8_t row) {
+static void drawRow(uint8_t row) {
   display.setDrawPosition(0, row);
   textX = 0;
-}
-
-static void endRow() {
-  display.drawSpace(128 - textX, false);
-}
-
-static void drawRow(uint8_t row) {
-  beginRow(row);
   switch(row) {
     case ROW_TITLE:
-      drawText_P(PSTR("TONE TEST "));
+      drawText_P(PSTR("MOZZI TEST "));
       drawNumber(UART_AUDIO_SAMPLE_RATE, 5);
       drawText_P(PSTR(" HZ"));
       break;
     case ROW_FREQ:
       drawText_P(PSTR("FREQ  "));
-      drawNumber(mode == MODE_SWEEP ? (int16_t)sweepHz : FREQUENCIES[freqIndex], 5);
+      drawNumber(FREQUENCIES[freqIndex], 4);
       drawText_P(PSTR(" HZ"));
-      break;
-    case ROW_LEVEL:
-      drawText_P(PSTR("LEVEL "));
-      drawNumber(-6 * levelShift, 5);
-      drawText_P(PSTR(" DB"));
-      break;
-    case ROW_MODE:
-      drawText_P(PSTR("MODE  "));
-      if(mode == MODE_SILENCE) {
-        drawText_P(PSTR("SILENCE"));
-      } else if(mode == MODE_SWEEP) {
-        drawText_P(PSTR("SWEEP"));
-      } else {
-        drawText_P(PSTR("TONE"));
+      if(muted) {
+        drawText_P(PSTR(" MUTE"));
       }
       break;
-    case ROW_DITHER:
-      drawText_P(PSTR("DITHER "));
-      drawText_P(g_uartAudioDither ? PSTR("ON") : PSTR("OFF"));
+    case ROW_OSC:
+      drawText_P(PSTR("OSC   "));
+      drawNumber(oscCount, 4);
+      break;
+    case ROW_TUNE:
+      drawText_P(PSTR("TUNE  "));
+      if(tuned) {
+        drawText_P(PSTR("  ON"));
+      } else {
+        drawText_P(PSTR(" OFF -0.82 ST"));
+      }
+      break;
+    case ROW_LOAD:
+      drawText_P(PSTR("AUDIO "));
+      drawNumber(shownLoad, 3);
+      drawText_P(PSTR("% CYC "));
+      drawNumber(shownCycles, 4);
       break;
     case ROW_FILL:
-      drawText_P(PSTR("MIN FILL "));
-      drawNumber(shownMinFill, 3);
+      drawText_P(PSTR("FILL  "));
+      drawNumber(shownMinFill, 4);
       if(shownMinFill == 0) {
         drawText_P(PSTR(" DROPOUT"));
       }
       break;
     case ROW_HELP:
-      drawText_P(PSTR("<>FRQ ^vLVL A:MD B:DT"));
+      drawText_P(PSTR("<>FRQ ^vOSC A:MU B:TN"));
       break;
   }
-  endRow();
+  display.drawSpace(128 - textX, false);
 }
 
 // At most one row per call, so the audio ring gets refilled in between.
@@ -226,7 +268,7 @@ static void markRow(uint8_t row) {
   dirtyRows |= 1 << row;
 }
 
-// --- Controls --------------------------------------------------------------
+// --- Controls ----------------------------------------------------------------
 
 static void handleButton(MidiboyInput::Button button) {
   switch(button) {
@@ -234,62 +276,39 @@ static void handleButton(MidiboyInput::Button button) {
       if(freqIndex > 0) {
         freqIndex--;
       }
-      if(mode == MODE_SWEEP) {
-        mode = MODE_TONE;
-      }
       break;
     case MidiboyInput::BUTTON_RIGHT:
       if(freqIndex < FREQ_COUNT - 1) {
         freqIndex++;
       }
-      if(mode == MODE_SWEEP) {
-        mode = MODE_TONE;
-      }
       break;
     case MidiboyInput::BUTTON_UP:
-      if(levelShift > 0) {
-        levelShift--;
+      if(oscCount < OSC_MAX) {
+        oscCount++;
       }
-      break;
+      markRow(ROW_OSC);
+      return;
     case MidiboyInput::BUTTON_DOWN:
-      if(levelShift < LEVEL_STEPS - 1) {
-        levelShift++;
+      if(oscCount > 1) {
+        oscCount--;
       }
-      break;
+      markRow(ROW_OSC);
+      return;
     case MidiboyInput::BUTTON_A:
-      mode = (mode + 1) % MODE_COUNT;
-      sweepHz = SWEEP_LOW_HZ;
+      muted = !muted;
       break;
     case MidiboyInput::BUTTON_B:
-      g_uartAudioDither = !g_uartAudioDither;
-      markRow(ROW_DITHER);
+      tuned = !tuned;
+      markRow(ROW_TUNE);
       break;
     default:
       return;
   }
-  if(mode == MODE_SWEEP) {
-    setFrequency(sweepHz);
-  } else {
-    setFrequency(FREQUENCIES[freqIndex]);
-  }
+  setFrequencies();
   markRow(ROW_FREQ);
-  markRow(ROW_LEVEL);
-  markRow(ROW_MODE);
 }
 
-static void updateSweep(unsigned long now) {
-  if(mode != MODE_SWEEP || now - lastSweepMs < SWEEP_STEP_MS) {
-    return;
-  }
-  lastSweepMs = now;
-  sweepHz *= SWEEP_FACTOR;
-  if(sweepHz > SWEEP_HIGH_HZ) {
-    sweepHz = SWEEP_LOW_HZ;
-  }
-  setFrequency(sweepHz);
-}
-
-// --- Main ------------------------------------------------------------------
+// --- Main --------------------------------------------------------------------
 
 void setup() {
   display.begin();
@@ -297,11 +316,17 @@ void setup() {
   input.begin();
   input.setButtonRepeatMs(150);
 
-  buildSineTable();
-  setFrequency(FREQUENCIES[freqIndex]);
+  for(uint8_t i = 0; i < OSC_MAX; i++) {
+    oscillators[i].setTable(SIN2048_DATA);
+  }
+  setFrequencies();
+  startCycleCounter();
+  // No startMozzi(): in custom output mode it only sets up audioHook()'s
+  // control counter, which this sketch doesn't use.
 
   // Last: from here on the loop must keep the ring fed.
   UartAudioOut::begin();
+  windowStartUs = micros();
 }
 
 void loop() {
@@ -316,15 +341,11 @@ void loop() {
   }
 
   unsigned long now = millis();
-  updateSweep(now);
   if(now - lastStatusMs >= STATUS_MS) {
     lastStatusMs = now;
-    shownMinFill = minFill;
-    minFill = 255;
+    updateMeter();
+    markRow(ROW_LOAD);
     markRow(ROW_FILL);
-    if(mode == MODE_SWEEP) {
-      markRow(ROW_FREQ);
-    }
   }
 
   fillAudio();
