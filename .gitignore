@@ -1,0 +1,11 @@
+# Build output (arduino.json "output": "../Build")
+Build/
+*.hex
+*.elf
+*.eep
+
+# Editor / OS
+.vscode/ipch/
+.vs/
+Thumbs.db
+desktop.ini

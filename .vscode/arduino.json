@@ -1,0 +1,7 @@
+{
+    "sketch": "MidiboySoundscape\\MidiboySoundscape.ino",
+    "board": "Blokas:avr:midiboy",
+    "programmer": "USBasp",
+    "output": "../Build",
+    "port": "COM5"
+}
