@@ -41,6 +41,14 @@
 
 extern volatile uint8_t g_uartAudioWriteIndex;
 
+// TPDF dither of +-1 frame level before the quantiser. Without it the noise
+// shaper can lock into a repeating pattern on silence or steady input, which
+// is heard as a high whistle (simulated: up to -22 dB at ~11.7, 15.6 or
+// 19.5 kHz). With it the whistle drops below -45 dB, but the steady hiss
+// rises ~5 dB and frames at the very loudest peaks may hit the rails.
+// Costs ~15 cycles per frame.
+extern bool g_uartAudioDither;
+
 namespace UartAudioOut {
   // Fills the ring with silence and starts the UART. Call once, after any
   // slow setup (display init, EEPROM): from here on the main loop has to keep

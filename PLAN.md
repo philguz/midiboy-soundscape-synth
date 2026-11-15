@@ -44,14 +44,32 @@ measure it (step 2).
 - Note: the VS Code extension's Verify/Upload buttons don't know about `libraries/`.
   Use the command line, as in the Sequencer.
 
-### Step 1: Prove audio out of MIDI OUT (no Mozzi) ⬜ ← riskiest, do first
-- [ ] A minimal test sketch: `UartAudioOut` (🟡 drafted) plus a 440 Hz sine from a lookup table.
-- [ ] Find out which contact of your DIN-jack adapter carries DIN pin 5 (the signal)
-      and whether pin 2 reaches the sleeve (ground). Type A, Type B and mono
-      adapters differ.
-- [ ] Listen and measure: pitch should be 440 Hz, the level about 2.5 Vpp, and the noise
-      floor acceptable. If the sound is distorted, try `UART_AUDIO_UBRR 2`.
-- [ ] Decide whether the cable needs an RC filter or attenuator (e.g. 1 kΩ + 10 nF).
+### Step 1: Prove audio out of MIDI OUT (no Mozzi) ✅
+- [x] Test sketch (the main `.ino` for now). It plays a sine through `UartAudioOut`, with
+      frequency, level, mute and sweep on the buttons, and shows ring fill on screen to
+      catch dropouts. Builds to 6.4 KB flash and 880 B RAM. The binary has only the Timer0
+      and UART interrupts, and the UART ISR is about 45 cycles per frame.
+- [x] Adapter: **TRS Type A**. Tip = DIN 5 = audio, sleeve = DIN 2 = ground, ring =
+      DIN 4 = +5 V DC through a resistor (no audio).
+- [x] First hardware test (no dither): pitch 440 Hz ✓, clean tone ✓, sweep ✓, no dropouts ✓.
+      In silence: high-frequency hiss, sometimes very noticeable. The simulation of the exact
+      integer code shows the cause: the noise shaper locks into a repeating pattern on
+      silence, giving whistles at about 11.7, 15.6 or 19.5 kHz, up to −22 dB. Added switchable
+      TPDF dither (on by default). It takes whistles below −45 dB but raises the steady hiss ~5 dB.
+- [x] Listen with dither on and off (B in the test sketch) and pick the default.
+      Chosen: **dither on** (`g_uartAudioDither = true`). A steady hiss is preferred over
+      occasional whistles.
+- Note: V-USB (USB MIDI) can't run alongside audio. Its interrupt outranks the UART
+  and blocks for tens of µs, so frames would be missed.
+- [x] Listen and measure: pitch 440 Hz ✓, no distortion at 1.25 Mbaud, noise floor
+      acceptable with dither.
+- [x] Level: the user's input clips above −12 to −18 dB (full scale is about 3 Vpp, too hot).
+- [x] Decide whether the cable needs an RC filter or attenuator: **skipped for now**, plain
+      adapter only. **So the mix peaks at −12 dB in code** (master headroom; LEVEL max
+      = −12 dB), at the cost of ~12 dB SNR. For later, the proposed attenuator plus
+      2-pole filter: tip → 3.3 kΩ → node (1 kΩ ‖ 33 nF to ground) → 4.7 kΩ → 4.7 nF to
+      ground → line in. About −16 dB with a 10 kΩ input, corners about 6 kHz. Attenuate in
+      the cable, not in code: scaling down in code keeps the hiss and loses SNR.
 
 ### Step 2: Mozzi in custom output mode ⬜
 - [ ] `MozziConfig.h` (🟡) plus a one-oscillator sketch through `audioHook()`. Check the pitch
@@ -65,7 +83,7 @@ Measure CPU after each layer.
 - [ ] 3b: Wind: xorshift noise, moving lowpass, gusts.
 - [ ] 3c: Chimes: 2 voices × 2 sine partials, random strikes, decay.
 - [ ] 3d: Echo: 512 B line at 1/8 rate (~260 ms), feedback.
-- [ ] Mix levels and clipping check at maximum settings.
+- [ ] Mix levels and clipping check at maximum settings. Output peak = −12 dB (±512).
 
 ### Step 4: UI ⬜ (`ParamScreen.*` 🟡, `.ino` not written)
 - [ ] Screen: title row (root, HOLD, chime flash) and 7 parameter rows

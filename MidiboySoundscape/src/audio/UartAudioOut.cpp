@@ -12,6 +12,10 @@ volatile uint8_t g_uartAudioWriteIndex;
 static int16_t g_error1;
 static int16_t g_error2;
 
+bool g_uartAudioDither = true;
+// xorshift16 state for the dither, never 0.
+static uint16_t g_ditherState = 0xACE1;
+
 // Sent when the ring runs dry: level 4 of 8, the midpoint, i.e. silence.
 #define FRAME_SILENCE 0xAA
 
@@ -63,11 +67,20 @@ void UartAudioOut::write(int16_t sample) {
   int16_t error1 = g_error1;
   int16_t error2 = g_error2;
   uint8_t w = g_uartAudioWriteIndex;
+  bool dither = g_uartAudioDither;
+  uint16_t random = g_ditherState;
 
   for(uint8_t i = 0; i < UART_AUDIO_FRAMES_PER_SAMPLE; i++) {
     // Output = x + (1 - z^-1)^2 * error: 2nd-order noise shaping.
     int16_t v = x - 2 * error1 + error2;
     int16_t rounded = v + 128;
+    if(dither) {
+      // Difference of two uniform bytes: triangular, -255..255.
+      random ^= random << 7;
+      random ^= random >> 9;
+      random ^= random << 8;
+      rounded += (int16_t)(uint8_t)(random >> 8) - (int16_t)(uint8_t)random;
+    }
     uint8_t level;
     if(rounded < 0) {
       level = 0;
@@ -84,6 +97,7 @@ void UartAudioOut::write(int16_t sample) {
 
   g_error1 = error1;
   g_error2 = error2;
+  g_ditherState = random;
   // The ring bytes must be stored before the ISR can see the new index.
   asm volatile("" ::: "memory");
   g_uartAudioWriteIndex = w;
