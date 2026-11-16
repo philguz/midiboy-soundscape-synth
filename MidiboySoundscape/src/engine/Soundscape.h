@@ -1,8 +1,7 @@
 #pragma once
-#include "../MozziConfig.h"
-#include <MozziHeadersOnly.h>
-#include <mozzi_fixmath.h>
+#include <Arduino.h>
 #include <avr/pgmspace.h>
+#include "../dsp/Dsp.h"
 
 // User parameters, in screen order.
 enum ParamId : uint8_t {
@@ -33,20 +32,18 @@ enum LayerBit : uint8_t {
 // input clips above that (see PLAN.md, step 1).
 #define SOUNDSCAPE_PEAK 511
 
-// Oscillators at the nominal MOZZI_AUDIO_RATE: pass frequencies through
-// tuneHz() first. Both are fully inlined; every cycle per sample counts.
-static_assert(MOZZI_AUDIO_RATE == 16384, "the oscillators assume 16384 Hz");
+// Oscillators. Both take a phase step from noteStep() (a full cycle is
+// 2^24) and are fully inlined; every cycle per sample counts.
 
 // Sawtooth from a 24-bit phase: the top byte is the sample, no table.
-// Resolution 1/1024 Hz, fine enough for slow detune on bass notes.
+// Resolution ~1/1000 Hz, fine enough for slow detune on bass notes.
 // ~16 cycles.
 struct SawOsc {
   __uint24 phase;
   __uint24 step;
 
-  // step = hz * 2^24 / 16384 = hz (Q16n16) >> 6.
-  void setFreq_Q16n16(Q16n16 hz) {
-    step = (__uint24)(hz >> 6);
+  void setStep(uint32_t newStep) {
+    step = (__uint24)newStep;
   }
 
   inline int8_t next() __attribute__((always_inline)) {
@@ -58,15 +55,13 @@ struct SawOsc {
 // Sine from a 16-bit phase and a 256-aligned table. Resolution 1/4 Hz:
 // under 1 cent from 260 Hz up, so for high notes only (the chimes).
 // ~16 cycles.
-extern const int8_t SINE_TABLE[256];
-
 struct SineOsc {
   uint16_t phase;
   uint16_t step;
 
-  // step = hz * 2^16 / 16384 = hz (Q16n16) >> 14, rounded.
-  void setFreq_Q16n16(Q16n16 hz) {
-    step = (uint16_t)((hz + (1UL << 13)) >> 14);
+  // Takes the same 2^24-per-cycle step as SawOsc, rounded to 16 bits.
+  void setStep(uint32_t newStep) {
+    step = (uint16_t)((newStep + 128) >> 8);
   }
 
   void setPhase(uint16_t newPhase) {
@@ -90,7 +85,7 @@ struct Wander {
   void tick(uint8_t low, uint8_t high, uint8_t period);
 };
 
-// 2-pole resonant lowpass, Mozzi's ResonantFilter topology with
+// 2-pole resonant lowpass after Mozzi's ResonantFilter (LGPL-2.1-or-later), with
 // 16x8 / 16x16 multiplies instead of 32x32 ones (about half the cycles).
 struct ResoLowpass {
   int16_t buf0;
@@ -127,10 +122,10 @@ class Soundscape {
     // New root and chord, right away.
     void newScene();
 
-    // From Mozzi's updateControl().
+    // Every CONTROL_PERIOD samples.
     void updateControl();
 
-    // From Mozzi's updateAudio(): one sample, clipped to +-SOUNDSCAPE_PEAK.
+    // One sample, clipped to +-SOUNDSCAPE_PEAK.
     int16_t next();
 
     // LayerBit mask.
@@ -163,8 +158,8 @@ class Soundscape {
     uint8_t _strikeCount;
 
     SawOsc _pad[PAD_VOICES];
-    Q16n16 _padFreq[PAD_VOICES];
-    Q16n16 _padTarget[PAD_VOICES];
+    uint32_t _padStep[PAD_VOICES];         // gliding, before detune
+    uint32_t _padTargetStep[PAD_VOICES];
     Wander _padDetune[PAD_VOICES];
     ResoLowpass _padFilter;
     Wander _padCutoff;

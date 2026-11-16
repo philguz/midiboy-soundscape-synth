@@ -1,7 +1,7 @@
 # Midiboy Soundscape: plan
 
-A random soundscape generator for the Blokas Midiboy (ATmega328P @ 20 MHz), built on
-Mozzi 2. Audio leaves through the **DIN MIDI OUT** port and reaches a line input through
+A random soundscape generator for the Blokas Midiboy (ATmega328P @ 20 MHz), with its own
+small synthesis code (Mozzi 2 until step 3). Audio leaves through the **DIN MIDI OUT** port and reaches a line input through
 a DIN-to-jack adapter. Project conventions follow `../Sequencer`: sketch folder plus
 `src/`, `.vscode/arduino.json`, arduino-cli build into `Build/`, USBasp upload.
 
@@ -15,13 +15,12 @@ Status: ✅ done · 🟡 drafted, not compiled or tested · ⬜ not started
 | UART in **async 8N1 mode at 1.25 Mbaud**, not SPI-master (MSPIM) mode | MSPIM drives XCK = PD4, which is the Midiboy's **USB pull-up pin**. |
 | Each 10-bit frame is a 9-level PWM cell (0–8 ones in the data bits) | The start and stop bits are fixed, so each frame sets one average level. |
 | 2nd-order noise shaping per frame, 8 frames per sample → **15625 Hz** | Simulated about 44 dB SNR in the 0–8 kHz band, about Mozzi's standard 8-bit PWM. Shaping each bit instead managed only 9–30 dB with the forced start/stop bits. |
-| Mozzi `MOZZI_OUTPUT_EXTERNAL_CUSTOM` | No Mozzi timer and no 512 B Mozzi buffer. We own a 256 B ring. Timer1 stays free. |
-| Pitch correction ×1.048576 in our code | Mozzi only accepts power-of-two rates (nominal 16384), but the real rate is 15625. |
+| No Mozzi (removed after step 3) | By then the engine used only Mozzi's `mtof`, `xorshift96`, a 16×8 multiply macro and its sine table; the oscillators, filter and loop were already our own. Without it, everything runs at the real 15625 Hz: no ×1.048576 pitch correction for Mozzi's power-of-two rate. Reusable Mozzi parts are kept in `third_party/` (LGPL). |
 | Encoder in the main loop, naked-asm UART ISR (~40 cycles per frame) | The ISR runs at 125 kHz, so it has to be minimal. |
 | `MidiboyDisplay` and `MidiboyInput` directly, no Arduboy2 or `Midiboy` global | No 1 KB frame buffer, and `Serial` is never linked, so the UART vector stays free. |
 | No EEPROM use for now | EEPROM is shared with the Sequencer's pattern slots on the same device. |
 | Encoder: 8-bit noise shaper in 1/8 level units, asm unrolled for 8 frames, 256 B flash quantiser table, ±½ level dither | ~21 cycles per frame (the C version took ~70 and starved the loop). Simulated: same noise as the 16-bit version up to −6 dB input. Fixes the rate at 1.25 Mbaud. |
-| Our own sample loop instead of Mozzi's `audioHook()` | In custom mode the hook only adds a 64-bit sample counter, ~80 cycles a sample. Mozzi still does the synthesis. |
+| Our own sample loop instead of Mozzi's `audioHook()` | In custom mode the hook only adds a 64-bit sample counter, ~80 cycles a sample. |
 
 CPU budget per sample (1280 cycles at 20 MHz), measured in step 2: the fixed part (ISR, encoder,
 loop) takes ~36 %, so ~620 cycles of wall time per sample remain for synthesis with ~15 % left for UI.
@@ -32,17 +31,18 @@ loop) takes ~36 %, so ~620 cycles of wall time per sample remain for synthesis w
 - [x] Mozzi 2.0.4 and FixMath 1.0.9 vendored in `libraries/`, so there's no
       install into `Documents` and no Controlled Folder Access issue. One local patch:
       a stray debug `Serial.println` in Mozzi's `FrequencyTimer2.cpp` pulled in
-      `HardwareSerial0`, whose USART ISR clashes with ours. See `libraries/README.md`.
+      `HardwareSerial0`, whose USART ISR clashes with ours. (`libraries/` was removed
+      with Mozzi after step 3.)
 - [x] `.vscode/arduino.json` (board `Blokas:avr:midiboy`, USBasp, output `../Build`),
       `.gitignore`, and a placeholder `MidiboySoundscape.ino`.
 - [x] `git init` (branch `main`, like the Sequencer).
 - [x] Build (arduino-cli 0.31, bundled with the VS Code Arduino extension). From `Synth/`:
-      `arduino-cli compile -b Blokas:avr:midiboy --libraries libraries --output-dir Build MidiboySoundscape`
+      `arduino-cli compile -b Blokas:avr:midiboy --output-dir Build MidiboySoundscape`
+      (until Mozzi was removed it also needed `--libraries libraries`)
       Result: links, 494 B flash, 266 B RAM. All drafts compile with no warnings under
       `--warnings all`, but they aren't called yet, so most of their code is
       optimised out.
-- Note: the VS Code extension's Verify/Upload buttons don't know about `libraries/`.
-  Use the command line, as in the Sequencer.
+- Note: use the command line for builds, as in the Sequencer.
 
 ### Step 1: Prove audio out of MIDI OUT (no Mozzi) ✅
 - [x] Test sketch (the main `.ino` for now). It plays a sine through `UartAudioOut`, with
@@ -116,6 +116,15 @@ Measure CPU after each layer.
       32 samples a call, which at that load gains the ring only ~4 samples, less than a
       row draw drains. It now refills the ring completely (timed in 32-sample batches).
 - [x] On hardware, all layers, DENSITY up: **CYC 1117 (87 %), MX 1277, DRP 0, PK 476, CL 0.**
+- [x] Mozzi removed. Its last pieces are replaced by `src/dsp/Dsp.*`: `noteStep()` (a
+      12-entry table of phase steps for 15625 Hz, shifted per octave, < 0.01 cent),
+      `Rng` (xorshift96), `mulShr8()` (Mozzi's 16×8 asm) and the sine table. Oscillators
+      take phase steps, not Hz. `MozziConfig.h`, `Tuning.h` (`tuneHz()`) and
+      `libraries/` are gone. Builds to 10.2 KB flash, 1009 B RAM.
+      Reusable Mozzi 2.0.4 and FixMath 1.0.9 parts (DSP classes, wavetables, samples,
+      waveshapers) are kept verbatim with their licences in `third_party/`; see its README.
+- [x] On hardware: sound unchanged, CYC 1113, MX 1280, DRP 0. CL up to 4 per 250 ms
+      when peaks line up (by design: the sum is clamped, not scaled).
 - [ ] 3a: Pad: 3 detuned saws, chord random walk in a scale, glide, resonant lowpass.
       Listen and read AUDIO / CYC / PK on hardware.
 - [ ] 3b: Wind: xorshift noise, moving lowpass, gusts.

@@ -12,7 +12,7 @@
 // filtering (or an RC filter in the cable) removes it.
 //
 // 8 frames make one audio sample: 125000 / 8 = 15625 Hz. The encoder runs in
-// the main loop (from Mozzi's audioOutput()) and fills a 256-byte ring; the
+// the main loop and fills a 256-byte ring; the
 // UART "data register empty" interrupt only copies one byte per frame.
 //
 // The UART's receiver stays off, so MIDI IN is ignored while audio runs.

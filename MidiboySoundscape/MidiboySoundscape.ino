@@ -26,14 +26,11 @@
 //
 // LEVEL is at maximum here, so PK shows the worst case.
 
-#include "src/MozziConfig.h"
-#include <Mozzi.h>
-
 #include <MidiboyDisplay.h>
 #include <MidiboyInput.h>
 #include <MidiboyFonts.h>
 #include "src/audio/UartAudioOut.h"
-#include "src/audio/Tuning.h"
+#include "src/dsp/Dsp.h"
 #include "src/engine/Soundscape.h"
 #include "src/engine/Scales.h"
 
@@ -90,37 +87,11 @@ static unsigned long lastStatusMs;
 static uint8_t dirtyRows = 0xFF;
 static uint8_t shownRoot = 0xFF;
 
-// --- Mozzi hooks -------------------------------------------------------------
-//
-// The loop calls updateControl() and updateAudio() itself instead of Mozzi's
-// audioHook(): in custom output mode the hook adds nothing but a 64-bit
-// sample counter (audioTicks / mozziMicros, unused here), ~80 cycles a sample.
-// Mozzi still needs these two defined, since its audioHook() is compiled in.
-
-// Samples per updateControl(), as Mozzi would: 16384 / 128.
-#define CONTROL_PERIOD (MOZZI_AUDIO_RATE / MOZZI_CONTROL_RATE)
 static uint8_t controlCountdown = 1;
-
-inline bool canBufferAudioOutput() {
-  return UartAudioOut::canWrite();
-}
-
-void audioOutput(const AudioOutput f) {
-  UartAudioOut::write(f.l());
-}
-
-void updateControl() {
-  soundscape.updateControl();
-}
-
-AudioOutput updateAudio() {
-  return MonoOutput(soundscape.next());
-}
 
 // --- Audio -------------------------------------------------------------------
 
-// Timer1 is free (Mozzi claims no timer in custom mode). Free-running at the
-// CPU clock, it counts cycles; one batch is well under its 65536 wrap.
+// Timer1 is free. Free-running at the CPU clock, it counts cycles; one batch is well under its 65536 wrap.
 static void startCycleCounter() {
   TCCR1A = 0;
   TCCR1B = _BV(CS10);
@@ -134,7 +105,7 @@ static uint8_t fillBatch() {
   while(count < AUDIO_BATCH_MAX && UartAudioOut::canWrite()) {
     if(--controlCountdown == 0) {
       controlCountdown = CONTROL_PERIOD;
-      updateControl();
+      soundscape.updateControl();
     }
     int16_t sample = soundscape.next();
     UartAudioOut::write(sample);
@@ -393,8 +364,6 @@ void setup() {
   soundscape.setParam(PARAM_LEVEL, PARAM_MAX);
 
   startCycleCounter();
-  // No startMozzi(): in custom output mode it only sets up audioHook()'s
-  // control counter, which this sketch doesn't use.
 
   // Last: from here on the loop must keep the ring fed.
   UartAudioOut::begin();

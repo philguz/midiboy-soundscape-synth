@@ -1,31 +1,6 @@
 #include "Soundscape.h"
 #include "Scales.h"
 #include "../audio/UartAudioOut.h"
-#include "../audio/Tuning.h"
-
-#include <mozzi_rand.h>
-#include <mozzi_midi.h>
-#include <mult16x8.h>
-
-// Mozzi's SIN256_DATA, in our own copy so SineOsc can use it with a 16-bit phase.
-const int8_t SINE_TABLE[256] PROGMEM __attribute__((aligned(256))) = {
-     0,    3,    6,    9,   12,   16,   19,   22,   25,   28,   31,   34,   37,   40,   43,   46,
-    49,   51,   54,   57,   60,   63,   65,   68,   71,   73,   76,   78,   81,   83,   85,   88,
-    90,   92,   94,   96,   98,  100,  102,  104,  106,  107,  109,  111,  112,  113,  115,  116,
-   117,  118,  120,  121,  122,  122,  123,  124,  125,  125,  126,  126,  126,  127,  127,  127,
-   127,  127,  127,  127,  126,  126,  126,  125,  125,  124,  123,  122,  122,  121,  120,  118,
-   117,  116,  115,  113,  112,  111,  109,  107,  106,  104,  102,  100,   98,   96,   94,   92,
-    90,   88,   85,   83,   81,   78,   76,   73,   71,   68,   65,   63,   60,   57,   54,   51,
-    49,   46,   43,   40,   37,   34,   31,   28,   25,   22,   19,   16,   12,    9,    6,    3,
-     0,   -3,   -6,   -9,  -12,  -16,  -19,  -22,  -25,  -28,  -31,  -34,  -37,  -40,  -43,  -46,
-   -49,  -51,  -54,  -57,  -60,  -63,  -65,  -68,  -71,  -73,  -76,  -78,  -81,  -83,  -85,  -88,
-   -90,  -92,  -94,  -96,  -98, -100, -102, -104, -106, -107, -109, -111, -112, -113, -115, -116,
-  -117, -118, -120, -121, -122, -122, -123, -124, -125, -125, -126, -126, -126, -127, -127, -127,
-  -127, -127, -127, -127, -126, -126, -126, -125, -125, -124, -123, -122, -122, -121, -120, -118,
-  -117, -116, -115, -113, -112, -111, -109, -107, -106, -104, -102, -100,  -98,  -96,  -94,  -92,
-   -90,  -88,  -85,  -83,  -81,  -78,  -76,  -73,  -71,  -68,  -65,  -63,  -60,  -57,  -54,  -51,
-   -49,  -46,  -43,  -40,  -37,  -34,  -31,  -28,  -25,  -22,  -19,  -16,  -12,   -9,   -6,   -3
-};
 
 static const uint8_t DEFAULT_PARAMS[PARAM_COUNT] = {
   0,    // MOOD: penta minor
@@ -44,26 +19,6 @@ static const uint8_t CHIME_INTERVAL_DS[PARAM_MAX + 1] PROGMEM = {
 
 // Upper-partial ratios for the chimes, 8.8 fixed point: bell, octave, twelfth.
 static const uint16_t CHIME_RATIOS[] PROGMEM = { 707, 512, 768, 645 };
-
-static inline uint8_t randomByte() {
-  return (uint8_t)xorshift96();
-}
-
-// 0..n-1
-static inline uint8_t randomBelow(uint8_t n) {
-  return ((uint16_t)randomByte() * n) >> 8;
-}
-
-// (a * b) >> 8 for signed 16-bit a and unsigned 8-bit b.
-static inline __attribute__((always_inline)) int16_t mulShr8(int16_t a, uint8_t b) {
-  int16_t result;
-  MultiSU16X8toH16(result, a, b);
-  return result;
-}
-
-static Q16n16 noteHz(uint8_t note) {
-  return tuneHz(Q16n16_mtof((Q16n16)note << 16));
-}
 
 // One sample of a chime voice. Silent voices cost nothing.
 static inline __attribute__((always_inline)) int16_t chimeSample(ChimeVoice& voice) {
@@ -85,12 +40,13 @@ void Wander::tick(uint8_t low, uint8_t high, uint8_t period) {
   } else if(value > target) {
     value--;
   } else {
-    target = low + randomBelow(high - low + 1);
+    target = low + Rng::below(high - low + 1);
   }
 }
 
-// Mozzi's formula: feedback = q + q * (1 - cutoff), 8.8 fixed point, so
-// 0..~2.0. Up to 1.0 is mild; resonance >= 128 at low cutoffs goes above.
+// Mozzi's ResonantFilter formula: feedback = q + q * (1 - cutoff), 8.8
+// fixed point, so 0..~2.0. Up to 1.0 is mild; resonance >= 128 at low
+// cutoffs goes above.
 void ResoLowpass::set(uint8_t newCutoff, uint8_t resonance) {
   cutoff = newCutoff;
   feedback = resonance + (((uint16_t)resonance * (uint8_t)(255 - newCutoff)) >> 8);
@@ -111,7 +67,7 @@ inline int16_t ResoLowpass::next(int16_t in) {
 }
 
 void Soundscape::begin(uint32_t seed) {
-  randSeed(seed);
+  Rng::seed(seed);
   for(uint8_t i = 0; i < PARAM_COUNT; i++) {
     _params[i] = DEFAULT_PARAMS[i];
   }
@@ -170,13 +126,13 @@ void Soundscape::begin(uint32_t seed) {
   newScene();
   // Start every pad voice on its note instead of gliding in from 0 Hz.
   for(uint8_t i = 0; i < PAD_VOICES; i++) {
-    _padFreq[i] = _padTarget[i];
+    _padStep[i] = _padTargetStep[i];
   }
 }
 
 void Soundscape::newScene() {
-  _root = 36 + randomBelow(12);
-  _chordDegree = randomBelow(Scales::length(_params[PARAM_MOOD]));
+  _root = 36 + Rng::below(12);
+  _chordDegree = Rng::below(Scales::length(_params[PARAM_MOOD]));
   setChordTargets();
   _chordTicks = 1;   // reschedule on the next tick
   nextChord();
@@ -186,9 +142,9 @@ void Soundscape::newScene() {
 // chord tones (degree +2 and +4, a triad in 7-note scales) an octave up.
 void Soundscape::setChordTargets() {
   uint8_t scale = _params[PARAM_MOOD];
-  _padTarget[0] = noteHz(Scales::note(scale, _root, _chordDegree));
-  _padTarget[1] = noteHz(Scales::note(scale, _root + 12, _chordDegree + 2));
-  _padTarget[2] = noteHz(Scales::note(scale, _root + 12, _chordDegree + 4));
+  _padTargetStep[0] = noteStep(Scales::note(scale, _root, _chordDegree));
+  _padTargetStep[1] = noteStep(Scales::note(scale, _root + 12, _chordDegree + 2));
+  _padTargetStep[2] = noteStep(Scales::note(scale, _root + 12, _chordDegree + 4));
 }
 
 void Soundscape::nextChord() {
@@ -196,7 +152,7 @@ void Soundscape::nextChord() {
     return;
   }
   // Step the chord root by up to 3 degrees, staying near the scene root.
-  int8_t step = (int8_t)randomBelow(6) - 3;
+  int8_t step = (int8_t)Rng::below(6) - 3;
   if(step >= 0) {
     step++;   // never 0: -3..-1, 1..3
   }
@@ -211,7 +167,7 @@ void Soundscape::nextChord() {
   // 30 s at DRIFT 0 down to ~8 s at DRIFT 15, then 50..150% of that.
   uint16_t seconds = 30 - ((_params[PARAM_DRIFT] * 3) >> 1);
   uint16_t base = seconds * CONTROL_HZ;
-  _chordTicks = (base >> 1) + (uint16_t)(((uint32_t)base * randomByte()) >> 8);
+  _chordTicks = (base >> 1) + (uint16_t)(((uint32_t)base * Rng::byte()) >> 8);
 }
 
 void Soundscape::strikeChime() {
@@ -221,17 +177,17 @@ void Soundscape::strikeChime() {
   uint8_t scale = _params[PARAM_MOOD];
   uint8_t length = Scales::length(scale);
   // Degrees across two octaves, starting an octave above the pad's top.
-  uint8_t note = Scales::note(scale, _root + 12, length + randomBelow(length * 2));
-  Q16n16 hz = noteHz(note);
-  uint16_t ratio = pgm_read_word(&CHIME_RATIOS[randomBelow(4)]);
+  uint8_t note = Scales::note(scale, _root + 12, length + Rng::below(length * 2));
+  uint32_t step = noteStep(note);
+  uint16_t ratio = pgm_read_word(&CHIME_RATIOS[Rng::below(4)]);
 
   voice.partial1.setPhase(0);
   voice.partial2.setPhase(0);
-  voice.partial1.setFreq_Q16n16(hz);
-  voice.partial2.setFreq_Q16n16((hz >> 8) * ratio);
-  voice.envelope = (uint16_t)(150 + randomBelow(106)) << 8;
+  voice.partial1.setStep(step);
+  voice.partial2.setStep((step >> 8) * ratio);
+  voice.envelope = (uint16_t)(150 + Rng::below(106)) << 8;
   voice.amp = voice.envelope >> 8;
-  voice.decayShift = 6 + randomBelow(3);
+  voice.decayShift = 6 + Rng::below(3);
   _strikeCount++;
 }
 
@@ -250,12 +206,11 @@ void Soundscape::updateControl() {
   // Pad: glide to the chord notes (time constant ~0.5 s), each voice with
   // its own slow detune of up to +-0.3% (~5 cents) for a chorus beat.
   for(uint8_t i = 0; i < PAD_VOICES; i++) {
-    int32_t diff = (int32_t)(_padTarget[i] - _padFreq[i]);
-    _padFreq[i] += diff >> 6;
+    int32_t diff = (int32_t)(_padTargetStep[i] - _padStep[i]);
+    _padStep[i] += diff >> 6;
     _padDetune[i].tick(0, 24, period + 8);
     int8_t wobble = (int8_t)_padDetune[i].value - 12;
-    Q16n16 hz = _padFreq[i] + (int32_t)(_padFreq[i] >> 12) * wobble;
-    _pad[i].setFreq_Q16n16(hz);
+    _pad[i].setStep(_padStep[i] + (int32_t)(_padStep[i] >> 12) * wobble);
   }
 
   uint8_t tone = _params[PARAM_TONE];
@@ -285,7 +240,7 @@ void Soundscape::updateControl() {
       strikeChime();
       // Next strike after 25..175% of the mean interval.
       uint16_t mean = (uint16_t)pgm_read_byte(&CHIME_INTERVAL_DS[density]) * CONTROL_HZ / 10;
-      _chimeTicks = (mean >> 2) + (uint16_t)(((uint32_t)mean * 3 / 2 * randomByte()) >> 8) + 1;
+      _chimeTicks = (mean >> 2) + (uint16_t)(((uint32_t)mean * 3 / 2 * Rng::byte()) >> 8) + 1;
     }
   } else {
     _chimeTicks = 1;
