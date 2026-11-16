@@ -4,8 +4,8 @@
     python tools/mid2melody.py song.mid            # writes src/melody/MelodyLocal.h
     python tools/mid2melody.py --original          # rewrites src/melody/MelodyDefault.h
 
-The firmware plays the table once at start-up, then carries on with the
-generative scene in the melody's key:
+In MELODY mode the firmware plays the table on a loop; switching back to
+SOUNDSCAPE carries on with the generative scene in the melody's key:
 
 - Notes at or above --split are struck on the two chime voices (bells with an
   octave partial, ~1 s decay). At most two notes start together: the highest
