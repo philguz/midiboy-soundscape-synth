@@ -33,6 +33,10 @@
 
 #define SHOW_METER 0
 
+// Layers that play (LayerBit mask). For tuning one layer alone, e.g.
+// LAYER_CHIMES, or LAYER_CHIMES | LAYER_ECHO.
+#define PLAY_LAYERS LAYER_ALL
+
 // fillAudio() refills the ring completely, timing it in batches of at most
 // AUDIO_BATCH_MAX samples so a batch stays below Timer1's 65536-cycle wrap.
 // At high load the ring refills slowly (at 86% load, 32 samples made gain
@@ -180,6 +184,7 @@ void setup() {
 
   soundscape.begin(noinitSeed ^ micros() ^ TCNT1);
   noinitSeed = Rng::next();
+  soundscape.setLayers(PLAY_LAYERS);
 
   screen.setMeter(SHOW_METER);
   screen.begin();

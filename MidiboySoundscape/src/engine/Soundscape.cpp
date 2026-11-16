@@ -340,7 +340,9 @@ void Soundscape::updateControl() {
 
   uint8_t echo = _params[PARAM_ECHO];
   _echoFeedback = echo * 11;   // up to ~0.65
-  _echoWet = echo * 8;         // up to ~0.47
+  // Up to 1.0: the 1/8-rate line and its smoother already take 10..20 dB
+  // off most chime notes.
+  _echoWet = echo * 17;
 
   _master = _params[PARAM_LEVEL] * 17;   // 255 = x1.0
 }
