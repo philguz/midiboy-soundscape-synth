@@ -1,82 +1,94 @@
 // Midiboy Soundscape: random soundscape generator, audio out of DIN MIDI OUT.
 //
-// Step 2 sketch: Mozzi in MOZZI_OUTPUT_EXTERNAL_CUSTOM mode. Mozzi generates
-// the samples (Oscil, updateAudio()); UartAudioOut sends them out of MIDI OUT.
-// Checks the pitch correction and measures how much CPU the audio path takes.
+// Step 3 sketch: the Soundscape engine with each layer switchable, so every
+// layer can be heard alone and its CPU cost measured. Starts with the pad only.
 //
 // Buttons:
-//   LEFT / RIGHT  frequency, in octaves (55 Hz .. 7040 Hz)
-//   UP / DOWN     oscillators, 1..8 (harmonics 1..N, summed): a CPU load test
-//   A             mute on / off
-//   B             pitch correction on / off. Off plays 16384/15625 flat:
-//                 440 Hz comes out as 420 Hz (0.82 semitones low).
+//   UP / DOWN     select a row (marked >)
+//   LEFT / RIGHT  change the selected row's value:
+//                   MOOD  scale          PAD   TONE      WIND  WIND level
+//                   CHIME DENSITY        ECHO  ECHO      DRIFT DRIFT
+//   A             on a layer row: switch the layer on / off
+//   B             new scene (new root and chord)
 //
-// Screen, updated 4 times a second:
-//   AUDIO  share of time the main loop spends making audio (Mozzi synthesis
-//          plus the UartAudioOut encoder, including the UART interrupt
-//          firing meanwhile). What's left is for the UI. 100% = can't keep up.
-//   CYC    the same as CPU cycles per sample. The budget is 1280.
-//   FILL   lowest ring fill since the last update. 0 = a dropout.
+// Screen, meters updated 4 times a second:
+//   CYC    CPU cycles per sample making audio (synthesis plus the
+//          UartAudioOut encoder, including the UART interrupt firing
+//          meanwhile), averaged over the last 250 ms. The budget is 1280.
+//   MX     the worst batch (4+ samples) in those 250 ms: chime bursts,
+//          control ticks.
+//   %      CYC as a share of the budget. What's left is for the UI.
+//          (Not timed with micros(): at 20 MHz the Arduino core's micros()
+//          runs 6.25% slow, since it multiplies by 64 / 20 = 3.)
+//   DRP    dropouts (the ring ran dry) since the last A or B press.
+//   PK     highest |sample| since the last update. 511 = the -12 dB ceiling.
+//   CL     samples clipped at the ceiling since the last update.
 //
-// Output peaks at -12 dB (+-512 of +-2048): the line input clips above that.
+// LEVEL is at maximum here, so PK shows the worst case.
 
 #include "src/MozziConfig.h"
 #include <Mozzi.h>
-#include <Oscil.h>
-#include <tables/sin2048_int8.h>
 
 #include <MidiboyDisplay.h>
 #include <MidiboyInput.h>
 #include <MidiboyFonts.h>
 #include "src/audio/UartAudioOut.h"
 #include "src/audio/Tuning.h"
+#include "src/engine/Soundscape.h"
+#include "src/engine/Scales.h"
 
-#define FREQ_COUNT 8
-#define FREQ_DEFAULT 3          // 440 Hz
-#define OSC_MAX 8
-
-// Samples per audioHook() batch, at most. The ring holds 32 samples (2 ms),
-// so this also bounds one batch below 65536 cycles for the Timer1 meter.
+// fillAudio() refills the ring completely, timing it in batches of at most
+// AUDIO_BATCH_MAX samples so a batch stays below Timer1's 65536-cycle wrap.
+// At high load the ring refills slowly (at 86% load, 32 samples made gain
+// only ~4 samples of fill), so topping it up before every UI step is what
+// lets a screen row (~10 samples of time) be drawn without a dropout.
 #define AUDIO_BATCH_MAX 32
+// Batches per fillAudio() call, at most, so the buttons still answer if the
+// synthesis ever overloads the CPU.
+#define AUDIO_BATCHES_MAX 8
 
 #define STATUS_MS 250
 #define CHAR_WIDTH 6
 
 enum Row : uint8_t {
-  ROW_TITLE = 0,
-  ROW_FREQ = 2,
-  ROW_OSC = 3,
-  ROW_TUNE = 4,
+  ROW_MOOD = 0,
+  ROW_PAD = 1,
+  ROW_WIND = 2,
+  ROW_CHIME = 3,
+  ROW_ECHO = 4,
   ROW_LOAD = 5,
   ROW_FILL = 6,
-  ROW_HELP = 7
+  ROW_DRIFT = 7
 };
 
-static const uint16_t FREQUENCIES[FREQ_COUNT] = {55, 110, 220, 440, 880, 1760, 3520, 7040};
+// Rows the cursor visits, top to bottom.
+static const uint8_t SELECTABLE[] = { ROW_MOOD, ROW_PAD, ROW_WIND, ROW_CHIME, ROW_ECHO, ROW_DRIFT };
+#define SELECTABLE_COUNT sizeof(SELECTABLE)
 
-// Right shift after summing N int8 voices (<< 2), so the peak stays within
-// +-512, i.e. -12 dB.
-static const uint8_t SUM_SHIFT[OSC_MAX + 1] = {0, 0, 1, 2, 2, 3, 3, 3, 3};
+static const char NOTE_NAMES[12][3] PROGMEM = {
+  "C ", "C#", "D ", "D#", "E ", "F ", "F#", "G ", "G#", "A ", "A#", "B "
+};
 
 static MidiboyDisplay display;
 static MidiboyInput input;
+static Soundscape soundscape;
 
-static Oscil<SIN2048_NUM_CELLS, MOZZI_AUDIO_RATE> oscillators[OSC_MAX];
+static uint8_t cursor;
 
-static uint8_t freqIndex = FREQ_DEFAULT;
-static uint8_t oscCount = 1;
-static bool muted;
-static bool tuned = true;
-
-static uint8_t minFill = 255;
-static uint8_t shownMinFill;
+static uint16_t dropouts;
+static uint16_t peak;
+static uint16_t shownPeak;
+static uint16_t clips;
+static uint16_t shownClips;
 static uint32_t busyCycles;
 static uint16_t busySamples;
+static uint16_t maxCycles;
 static uint8_t shownLoad;
 static uint16_t shownCycles;
-static unsigned long windowStartUs;
+static uint16_t shownMaxCycles;
 static unsigned long lastStatusMs;
 static uint8_t dirtyRows = 0xFF;
+static uint8_t shownRoot = 0xFF;
 
 // --- Mozzi hooks -------------------------------------------------------------
 //
@@ -98,30 +110,14 @@ void audioOutput(const AudioOutput f) {
 }
 
 void updateControl() {
+  soundscape.updateControl();
 }
 
 AudioOutput updateAudio() {
-  int16_t sum = 0;
-  for(uint8_t i = 0; i < oscCount; i++) {
-    sum += oscillators[i].next();
-  }
-  if(muted) {
-    return MonoOutput(0);
-  }
-  return MonoOutput((sum << 2) >> SUM_SHIFT[oscCount]);
+  return MonoOutput(soundscape.next());
 }
 
 // --- Audio -------------------------------------------------------------------
-
-static void setFrequencies() {
-  Q16n16 base = (Q16n16)FREQUENCIES[freqIndex] << 16;
-  if(tuned) {
-    base = tuneHz(base);
-  }
-  for(uint8_t i = 0; i < OSC_MAX; i++) {
-    oscillators[i].setFreq_Q16n16(base * (i + 1));
-  }
-}
 
 // Timer1 is free (Mozzi claims no timer in custom mode). Free-running at the
 // CPU clock, it counts cycles; one batch is well under its 65536 wrap.
@@ -131,11 +127,8 @@ static void startCycleCounter() {
   TIMSK1 = 0;
 }
 
-static void fillAudio() {
-  uint8_t fill = (uint8_t)(g_uartAudioWriteIndex - UART_AUDIO_READ_INDEX);
-  if(fill < minFill) {
-    minFill = fill;
-  }
+// One batch: up to AUDIO_BATCH_MAX samples. Returns how many were made.
+static uint8_t fillBatch() {
   uint16_t start = TCNT1;
   uint8_t count = 0;
   while(count < AUDIO_BATCH_MAX && UartAudioOut::canWrite()) {
@@ -143,26 +136,62 @@ static void fillAudio() {
       controlCountdown = CONTROL_PERIOD;
       updateControl();
     }
-    UartAudioOut::write(updateAudio().l());
+    int16_t sample = soundscape.next();
+    UartAudioOut::write(sample);
+    uint16_t level = sample < 0 ? -sample : sample;
+    if(level > peak) {
+      peak = level;
+    }
+    if(level >= SOUNDSCAPE_PEAK) {
+      clips++;
+    }
     count++;
   }
   if(count != 0) {
-    busyCycles += (uint16_t)(TCNT1 - start);
+    uint16_t cycles = (uint16_t)(TCNT1 - start);
+    busyCycles += cycles;
     busySamples += count;
+    // Small batches are mostly loop overhead, so they don't count for MX.
+    if(count >= 4) {
+      uint16_t perSample = cycles / count;
+      if(perSample > maxCycles) {
+        maxCycles = perSample;
+      }
+    }
+  }
+  return count;
+}
+
+// Fills the ring up.
+static void fillAudio() {
+  // An empty ring means the UART interrupt is sending silence: a dropout.
+  // (It is never empty otherwise: it starts half full.)
+  if(g_uartAudioWriteIndex == UART_AUDIO_READ_INDEX && dropouts < 999) {
+    dropouts++;
+  }
+  for(uint8_t i = 0; i < AUDIO_BATCHES_MAX; i++) {
+    if(fillBatch() == 0) {
+      break;
+    }
   }
 }
 
 // Turns the window's counts into the numbers on screen.
+// CPU cycles per sample at 15625 Hz.
+#define CYCLE_BUDGET (F_CPU / UART_AUDIO_SAMPLE_RATE)
+
 static void updateMeter() {
-  unsigned long now = micros();
-  uint32_t elapsedCycles = (now - windowStartUs) * (F_CPU / 1000000UL);
-  windowStartUs = now;
-  shownLoad = elapsedCycles != 0 ? (uint8_t)((busyCycles * 100) / elapsedCycles) : 0;
   shownCycles = busySamples != 0 ? (uint16_t)(busyCycles / busySamples) : 0;
+  uint16_t load = (uint32_t)shownCycles * 100 / CYCLE_BUDGET;
+  shownLoad = load > 999 ? 999 : load;
+  shownMaxCycles = maxCycles;
+  maxCycles = 0;
   busyCycles = 0;
   busySamples = 0;
-  shownMinFill = minFill;
-  minFill = 255;
+  shownPeak = peak;
+  peak = 0;
+  shownClips = clips;
+  clips = 0;
 }
 
 // --- Screen ------------------------------------------------------------------
@@ -202,50 +231,59 @@ static void drawNumber(uint16_t value, uint8_t width) {
   }
 }
 
+static void drawLayer(const char* name, uint8_t layer, uint8_t param) {
+  drawText_P(name);
+  drawText_P((soundscape.getLayers() & layer) ? PSTR(" ON  ") : PSTR(" OFF "));
+  drawNumber(soundscape.getParam(param), 2);
+}
+
 static void drawRow(uint8_t row) {
   display.setDrawPosition(0, row);
   textX = 0;
+  drawChar(SELECTABLE[cursor] == row ? '>' : ' ', false);
   switch(row) {
-    case ROW_TITLE:
-      drawText_P(PSTR("MOZZI TEST "));
-      drawNumber(UART_AUDIO_SAMPLE_RATE, 5);
-      drawText_P(PSTR(" HZ"));
+    case ROW_MOOD:
+      drawText_P(PSTR("MOOD  "));
+      drawText_P(Scales::name(soundscape.getParam(PARAM_MOOD)));
+      drawChar(' ', false);
+      drawText_P(NOTE_NAMES[soundscape.getRoot()]);
       break;
-    case ROW_FREQ:
-      drawText_P(PSTR("FREQ  "));
-      drawNumber(FREQUENCIES[freqIndex], 4);
-      drawText_P(PSTR(" HZ"));
-      if(muted) {
-        drawText_P(PSTR(" MUTE"));
-      }
+    case ROW_PAD:
+      drawLayer(PSTR("PAD  "), LAYER_PAD, PARAM_TONE);
+      drawText_P(PSTR(" TONE"));
       break;
-    case ROW_OSC:
-      drawText_P(PSTR("OSC   "));
-      drawNumber(oscCount, 4);
+    case ROW_WIND:
+      drawLayer(PSTR("WIND "), LAYER_WIND, PARAM_WIND);
       break;
-    case ROW_TUNE:
-      drawText_P(PSTR("TUNE  "));
-      if(tuned) {
-        drawText_P(PSTR("  ON"));
-      } else {
-        drawText_P(PSTR(" OFF -0.82 ST"));
-      }
+    case ROW_CHIME:
+      drawLayer(PSTR("CHIME"), LAYER_CHIMES, PARAM_DENSITY);
+      drawText_P(PSTR(" DENS"));
+      break;
+    case ROW_ECHO:
+      drawLayer(PSTR("ECHO "), LAYER_ECHO, PARAM_ECHO);
       break;
     case ROW_LOAD:
-      drawText_P(PSTR("AUDIO "));
-      drawNumber(shownLoad, 3);
-      drawText_P(PSTR("% CYC "));
+      drawText_P(PSTR("CYC"));
       drawNumber(shownCycles, 4);
+      drawText_P(PSTR(" MX"));
+      drawNumber(shownMaxCycles, 5);
+      drawNumber(shownLoad, 4);
+      drawChar('%', false);
       break;
     case ROW_FILL:
-      drawText_P(PSTR("FILL  "));
-      drawNumber(shownMinFill, 4);
-      if(shownMinFill == 0) {
-        drawText_P(PSTR(" DROPOUT"));
-      }
+      drawText_P(PSTR("DRP"));
+      drawNumber(dropouts, 4);
+      drawText_P(PSTR(" PK"));
+      drawNumber(shownPeak, 4);
+      drawText_P(PSTR(" CL"));
+      drawNumber(shownClips > 999 ? 999 : shownClips, 3);
       break;
-    case ROW_HELP:
-      drawText_P(PSTR("<>FRQ ^vOSC A:MU B:TN"));
+    case ROW_DRIFT:
+      drawText_P(PSTR("DRIFT       "));
+      drawNumber(soundscape.getParam(PARAM_DRIFT), 2);
+      if(soundscape.isHeld()) {
+        drawText_P(PSTR(" HOLD"));
+      }
       break;
   }
   display.drawSpace(128 - textX, false);
@@ -270,42 +308,76 @@ static void markRow(uint8_t row) {
 
 // --- Controls ----------------------------------------------------------------
 
+static void changeParam(uint8_t id, int8_t delta) {
+  uint8_t value = soundscape.getParam(id);
+  if(delta < 0) {
+    if(value == 0) {
+      return;
+    }
+    value--;
+  } else {
+    value++;
+  }
+  soundscape.setParam(id, value);
+}
+
+// The parameter and layer behind a row, if any.
+static bool rowTarget(uint8_t row, uint8_t& param, uint8_t& layer) {
+  layer = 0;
+  switch(row) {
+    case ROW_MOOD:  param = PARAM_MOOD; return true;
+    case ROW_PAD:   param = PARAM_TONE;    layer = LAYER_PAD;    return true;
+    case ROW_WIND:  param = PARAM_WIND;    layer = LAYER_WIND;   return true;
+    case ROW_CHIME: param = PARAM_DENSITY; layer = LAYER_CHIMES; return true;
+    case ROW_ECHO:  param = PARAM_ECHO;    layer = LAYER_ECHO;   return true;
+    case ROW_DRIFT: param = PARAM_DRIFT; return true;
+  }
+  return false;
+}
+
 static void handleButton(MidiboyInput::Button button) {
+  uint8_t row = SELECTABLE[cursor];
+  uint8_t param;
+  uint8_t layer;
+  bool hasTarget = rowTarget(row, param, layer);
+
   switch(button) {
-    case MidiboyInput::BUTTON_LEFT:
-      if(freqIndex > 0) {
-        freqIndex--;
-      }
-      break;
-    case MidiboyInput::BUTTON_RIGHT:
-      if(freqIndex < FREQ_COUNT - 1) {
-        freqIndex++;
-      }
-      break;
     case MidiboyInput::BUTTON_UP:
-      if(oscCount < OSC_MAX) {
-        oscCount++;
+      if(cursor > 0) {
+        cursor--;
+        markRow(row);
+        markRow(SELECTABLE[cursor]);
       }
-      markRow(ROW_OSC);
-      return;
+      break;
     case MidiboyInput::BUTTON_DOWN:
-      if(oscCount > 1) {
-        oscCount--;
+      if(cursor < SELECTABLE_COUNT - 1) {
+        cursor++;
+        markRow(row);
+        markRow(SELECTABLE[cursor]);
       }
-      markRow(ROW_OSC);
-      return;
+      break;
+    case MidiboyInput::BUTTON_LEFT:
+    case MidiboyInput::BUTTON_RIGHT:
+      if(hasTarget) {
+        changeParam(param, button == MidiboyInput::BUTTON_LEFT ? -1 : 1);
+        markRow(row);
+      }
+      break;
     case MidiboyInput::BUTTON_A:
-      muted = !muted;
+      if(layer != 0) {
+        soundscape.setLayers(soundscape.getLayers() ^ layer);
+        markRow(row);
+      }
+      dropouts = 0;
       break;
     case MidiboyInput::BUTTON_B:
-      tuned = !tuned;
-      markRow(ROW_TUNE);
+      soundscape.newScene();
+      markRow(ROW_MOOD);
+      dropouts = 0;
       break;
     default:
-      return;
+      break;
   }
-  setFrequencies();
-  markRow(ROW_FREQ);
 }
 
 // --- Main --------------------------------------------------------------------
@@ -316,17 +388,16 @@ void setup() {
   input.begin();
   input.setButtonRepeatMs(150);
 
-  for(uint8_t i = 0; i < OSC_MAX; i++) {
-    oscillators[i].setTable(SIN2048_DATA);
-  }
-  setFrequencies();
+  soundscape.begin(micros() ^ ((uint32_t)TCNT0 << 16));
+  soundscape.setLayers(LAYER_PAD);
+  soundscape.setParam(PARAM_LEVEL, PARAM_MAX);
+
   startCycleCounter();
   // No startMozzi(): in custom output mode it only sets up audioHook()'s
   // control counter, which this sketch doesn't use.
 
   // Last: from here on the loop must keep the ring fed.
   UartAudioOut::begin();
-  windowStartUs = micros();
 }
 
 void loop() {
@@ -346,6 +417,11 @@ void loop() {
     updateMeter();
     markRow(ROW_LOAD);
     markRow(ROW_FILL);
+  }
+  // The root changes on new scenes only; the screen follows.
+  if(soundscape.getRoot() != shownRoot) {
+    shownRoot = soundscape.getRoot();
+    markRow(ROW_MOOD);
   }
 
   fillAudio();

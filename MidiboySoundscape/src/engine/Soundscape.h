@@ -1,7 +1,8 @@
 #pragma once
 #include "../MozziConfig.h"
 #include <MozziHeadersOnly.h>
-#include <Oscil.h>
+#include <mozzi_fixmath.h>
+#include <avr/pgmspace.h>
 
 // User parameters, in screen order.
 enum ParamId : uint8_t {
@@ -18,7 +19,65 @@ enum ParamId : uint8_t {
 // Range of every parameter but MOOD.
 #define PARAM_MAX 15
 
-typedef Oscil<256, MOZZI_AUDIO_RATE> Osc256;
+// Layers, as bits for setLayers(). All on by default; switching one off
+// skips its work entirely (for listening to and measuring each alone).
+enum LayerBit : uint8_t {
+  LAYER_PAD = 1,
+  LAYER_WIND = 2,
+  LAYER_CHIMES = 4,
+  LAYER_ECHO = 8,
+  LAYER_ALL = 15
+};
+
+// Peak of next(): +-512, i.e. -12 dB of the 12-bit range, since the line
+// input clips above that (see PLAN.md, step 1).
+#define SOUNDSCAPE_PEAK 511
+
+// Oscillators at the nominal MOZZI_AUDIO_RATE: pass frequencies through
+// tuneHz() first. Both are fully inlined; every cycle per sample counts.
+static_assert(MOZZI_AUDIO_RATE == 16384, "the oscillators assume 16384 Hz");
+
+// Sawtooth from a 24-bit phase: the top byte is the sample, no table.
+// Resolution 1/1024 Hz, fine enough for slow detune on bass notes.
+// ~16 cycles.
+struct SawOsc {
+  __uint24 phase;
+  __uint24 step;
+
+  // step = hz * 2^24 / 16384 = hz (Q16n16) >> 6.
+  void setFreq_Q16n16(Q16n16 hz) {
+    step = (__uint24)(hz >> 6);
+  }
+
+  inline int8_t next() __attribute__((always_inline)) {
+    phase += step;
+    return (int8_t)((uint8_t)(phase >> 16) ^ 0x80);
+  }
+};
+
+// Sine from a 16-bit phase and a 256-aligned table. Resolution 1/4 Hz:
+// under 1 cent from 260 Hz up, so for high notes only (the chimes).
+// ~16 cycles.
+extern const int8_t SINE_TABLE[256];
+
+struct SineOsc {
+  uint16_t phase;
+  uint16_t step;
+
+  // step = hz * 2^16 / 16384 = hz (Q16n16) >> 14, rounded.
+  void setFreq_Q16n16(Q16n16 hz) {
+    step = (uint16_t)((hz + (1UL << 13)) >> 14);
+  }
+
+  void setPhase(uint16_t newPhase) {
+    phase = newPhase;
+  }
+
+  inline int8_t next() __attribute__((always_inline)) {
+    phase += step;
+    return (int8_t)pgm_read_byte(&SINE_TABLE[phase >> 8]);
+  }
+};
 
 // Slow random walk at control rate: steps by 1 towards a random target,
 // then picks the next target.
@@ -45,8 +104,8 @@ struct ResoLowpass {
 
 // A struck bell: two sine partials sharing one decaying envelope.
 struct ChimeVoice {
-  Osc256 partial1;
-  Osc256 partial2;
+  SineOsc partial1;
+  SineOsc partial2;
   uint16_t envelope;   // 8.8 fixed point
   uint8_t amp;         // envelope >> 8, read at audio rate
   uint8_t decayShift;  // envelope -= envelope >> decayShift every tick
@@ -71,8 +130,12 @@ class Soundscape {
     // From Mozzi's updateControl().
     void updateControl();
 
-    // From Mozzi's updateAudio(): one sample, 12 bits.
+    // From Mozzi's updateAudio(): one sample, clipped to +-SOUNDSCAPE_PEAK.
     int16_t next();
+
+    // LayerBit mask.
+    uint8_t getLayers() const;
+    void setLayers(uint8_t layers);
 
     uint8_t getParam(uint8_t id) const;
     // Clamped to the parameter's range.
@@ -90,6 +153,7 @@ class Soundscape {
 
   private:
     uint8_t _params[PARAM_COUNT];
+    uint8_t _layers;
     bool _held;
     uint8_t _root;          // MIDI note of the scene root, 36..47
     int8_t _chordDegree;
@@ -98,7 +162,7 @@ class Soundscape {
     uint8_t _nextChime;
     uint8_t _strikeCount;
 
-    Osc256 _pad[PAD_VOICES];
+    SawOsc _pad[PAD_VOICES];
     Q16n16 _padFreq[PAD_VOICES];
     Q16n16 _padTarget[PAD_VOICES];
     Wander _padDetune[PAD_VOICES];
@@ -110,6 +174,8 @@ class Soundscape {
     int16_t _windLow;
     int16_t _windRumble;
     uint8_t _windAmp;
+    uint8_t _windHalf;     // toggles every sample
+    int16_t _windOut;      // last half-rate value
     Wander _windCutoff;
     Wander _windSwell;
 

@@ -6,8 +6,26 @@
 #include <mozzi_rand.h>
 #include <mozzi_midi.h>
 #include <mult16x8.h>
-#include <tables/sin256_int8.h>
-#include <tables/saw256_int8.h>
+
+// Mozzi's SIN256_DATA, in our own copy so SineOsc can use it with a 16-bit phase.
+const int8_t SINE_TABLE[256] PROGMEM __attribute__((aligned(256))) = {
+     0,    3,    6,    9,   12,   16,   19,   22,   25,   28,   31,   34,   37,   40,   43,   46,
+    49,   51,   54,   57,   60,   63,   65,   68,   71,   73,   76,   78,   81,   83,   85,   88,
+    90,   92,   94,   96,   98,  100,  102,  104,  106,  107,  109,  111,  112,  113,  115,  116,
+   117,  118,  120,  121,  122,  122,  123,  124,  125,  125,  126,  126,  126,  127,  127,  127,
+   127,  127,  127,  127,  126,  126,  126,  125,  125,  124,  123,  122,  122,  121,  120,  118,
+   117,  116,  115,  113,  112,  111,  109,  107,  106,  104,  102,  100,   98,   96,   94,   92,
+    90,   88,   85,   83,   81,   78,   76,   73,   71,   68,   65,   63,   60,   57,   54,   51,
+    49,   46,   43,   40,   37,   34,   31,   28,   25,   22,   19,   16,   12,    9,    6,    3,
+     0,   -3,   -6,   -9,  -12,  -16,  -19,  -22,  -25,  -28,  -31,  -34,  -37,  -40,  -43,  -46,
+   -49,  -51,  -54,  -57,  -60,  -63,  -65,  -68,  -71,  -73,  -76,  -78,  -81,  -83,  -85,  -88,
+   -90,  -92,  -94,  -96,  -98, -100, -102, -104, -106, -107, -109, -111, -112, -113, -115, -116,
+  -117, -118, -120, -121, -122, -122, -123, -124, -125, -125, -126, -126, -126, -127, -127, -127,
+  -127, -127, -127, -127, -126, -126, -126, -125, -125, -124, -123, -122, -122, -121, -120, -118,
+  -117, -116, -115, -113, -112, -111, -109, -107, -106, -104, -102, -100,  -98,  -96,  -94,  -92,
+   -90,  -88,  -85,  -83,  -81,  -78,  -76,  -73,  -71,  -68,  -65,  -63,  -60,  -57,  -54,  -51,
+   -49,  -46,  -43,  -40,  -37,  -34,  -31,  -28,  -25,  -22,  -19,  -16,  -12,   -9,   -6,   -3
+};
 
 static const uint8_t DEFAULT_PARAMS[PARAM_COUNT] = {
   0,    // MOOD: penta minor
@@ -37,7 +55,7 @@ static inline uint8_t randomBelow(uint8_t n) {
 }
 
 // (a * b) >> 8 for signed 16-bit a and unsigned 8-bit b.
-static inline int16_t mulShr8(int16_t a, uint8_t b) {
+static inline __attribute__((always_inline)) int16_t mulShr8(int16_t a, uint8_t b) {
   int16_t result;
   MultiSU16X8toH16(result, a, b);
   return result;
@@ -45,6 +63,15 @@ static inline int16_t mulShr8(int16_t a, uint8_t b) {
 
 static Q16n16 noteHz(uint8_t note) {
   return tuneHz(Q16n16_mtof((Q16n16)note << 16));
+}
+
+// One sample of a chime voice. Silent voices cost nothing.
+static inline __attribute__((always_inline)) int16_t chimeSample(ChimeVoice& voice) {
+  if(voice.amp == 0) {
+    return 0;
+  }
+  int16_t s = (int16_t)voice.partial1.next() + (voice.partial2.next() >> 1);
+  return mulShr8(s, voice.amp);
 }
 
 void Wander::tick(uint8_t low, uint8_t high, uint8_t period) {
@@ -62,14 +89,22 @@ void Wander::tick(uint8_t low, uint8_t high, uint8_t period) {
   }
 }
 
+// Mozzi's formula: feedback = q + q * (1 - cutoff), 8.8 fixed point, so
+// 0..~2.0. Up to 1.0 is mild; resonance >= 128 at low cutoffs goes above.
 void ResoLowpass::set(uint8_t newCutoff, uint8_t resonance) {
   cutoff = newCutoff;
-  feedback = resonance + (((uint16_t)resonance * (255 + (uint16_t)newCutoff)) >> 8);
+  feedback = resonance + (((uint16_t)resonance * (uint8_t)(255 - newCutoff)) >> 8);
 }
 
 inline int16_t ResoLowpass::next(int16_t in) {
   int16_t band = buf0 - buf1;
-  int16_t drive = in - buf0 + (int16_t)(((int32_t)band * (int16_t)feedback) >> 8);
+  // band * feedback / 256 with a 16x8 multiply: the high byte of feedback
+  // is 0 or 1 (feedback < 512).
+  int16_t resonance = mulShr8(band, (uint8_t)feedback);
+  if(feedback & 0x100) {
+    resonance += band;
+  }
+  int16_t drive = in - buf0 + resonance;
   buf0 += mulShr8(drive, cutoff);
   buf1 += mulShr8(buf0 - buf1, cutoff);
   return buf1;
@@ -80,13 +115,13 @@ void Soundscape::begin(uint32_t seed) {
   for(uint8_t i = 0; i < PARAM_COUNT; i++) {
     _params[i] = DEFAULT_PARAMS[i];
   }
+  _layers = LAYER_ALL;
   _held = false;
   _strikeCount = 0;
   _nextChime = 0;
   _chimeTicks = CONTROL_HZ * 2;
 
   for(uint8_t i = 0; i < PAD_VOICES; i++) {
-    _pad[i].setTable(SAW256_DATA);
     _padDetune[i].value = 12;
     _padDetune[i].target = 12;
     _padDetune[i].wait = 0;
@@ -105,16 +140,16 @@ void Soundscape::begin(uint32_t seed) {
   _windLow = 0;
   _windRumble = 0;
   _windAmp = 0;
-  _windCutoff.value = 40;
-  _windCutoff.target = 40;
+  _windHalf = 0;
+  _windOut = 0;
+  _windCutoff.value = 80;
+  _windCutoff.target = 80;
   _windCutoff.wait = 0;
   _windSwell.value = 0;
   _windSwell.target = 128;
   _windSwell.wait = 0;
 
   for(uint8_t i = 0; i < CHIME_VOICES; i++) {
-    _chime[i].partial1.setTable(SIN256_DATA);
-    _chime[i].partial2.setTable(SIN256_DATA);
     _chime[i].envelope = 0;
     _chime[i].amp = 0;
     _chime[i].decayShift = 7;
@@ -230,8 +265,10 @@ void Soundscape::updateControl() {
 
   // Wind: gusts in level and colour.
   _windSwell.tick(30, 255, period >> 1);
-  _windCutoff.tick(12, 110, period >> 1);
-  _windAmp = ((uint16_t)_windSwell.value * _params[PARAM_WIND]) >> 5;
+  // Coefficients for the half-rate wind: twice the full-rate ones.
+  _windCutoff.tick(24, 220, period >> 2);
+  // At half rate the same cutoff passes sqrt(2) times more noise: x0.71.
+  _windAmp = ((uint32_t)_windSwell.value * _params[PARAM_WIND] * 181) >> 13;
 
   // Chimes.
   for(uint8_t i = 0; i < CHIME_VOICES; i++) {
@@ -256,62 +293,97 @@ void Soundscape::updateControl() {
 
   uint8_t echo = _params[PARAM_ECHO];
   _echoFeedback = echo * 11;   // up to ~0.65
-  _echoWet = echo * 16;
+  _echoWet = echo * 8;         // up to ~0.47
 
-  _master = _params[PARAM_LEVEL] * 17;
+  _master = _params[PARAM_LEVEL] * 17;   // 255 = x1.0
 }
 
+// Levels before the master, worst case / typical: pad +-350 / 200 (simulated),
+// wind +-420 / 100 (WIND 15), chimes +-380 / 150, echo +-450 / 80 (ECHO 15).
+// Those peaks almost never line up, so the sum is clipped, not scaled down.
 int16_t Soundscape::next() {
-  // Pad: three saws -> resonant lowpass -> slow swell. Up to about +-800.
-  int16_t pad = (int16_t)_pad[0].next() + _pad[1].next() + _pad[2].next();
-  pad = _padFilter.next(pad >> 1);
-  pad = mulShr8(pad, _padSwell.value) << 1;
+  int16_t mix = 0;
+
+  // Pad: three saws (+-384) -> resonant lowpass -> slow swell (up to 0.9).
+  // Simulated peak 120..350 depending on TONE; the filter never overflows.
+  if(_layers & LAYER_PAD) {
+    int16_t pad = (int16_t)_pad[0].next() + _pad[1].next() + _pad[2].next();
+    pad = _padFilter.next(pad);
+    mix += mulShr8(pad, _padSwell.value);
+  }
 
   // Wind: xorshift noise -> moving lowpass, minus a fixed ~80 Hz lowpass to
-  // drop the rumble. Up to about +-500.
-  uint16_t n = _noise;
-  n ^= n << 7;
-  n ^= n >> 9;
-  n ^= n << 8;
-  _noise = n;
-  int16_t white = (int16_t)(int8_t)(n >> 8) << 4;
-  _windLow += mulShr8(white - _windLow, _windCutoff.value);
-  _windRumble += (_windLow - _windRumble) >> 5;
-  int16_t wind = mulShr8(_windLow - _windRumble, _windAmp);
-
-  // Chimes. Silent voices cost nothing.
-  int16_t chimes = 0;
-  for(uint8_t i = 0; i < CHIME_VOICES; i++) {
-    ChimeVoice& voice = _chime[i];
-    if(voice.amp != 0) {
-      int16_t s = (int16_t)voice.partial1.next() + (voice.partial2.next() >> 1);
-      chimes += mulShr8(s, voice.amp);
+  // drop the rumble. Runs at half rate (its cutoff stays under ~1.3 kHz):
+  // every other sample makes a new value and plays the average of the old
+  // and new one, the sample between plays the new one.
+  if(_layers & LAYER_WIND) {
+    _windHalf ^= 1;
+    if(_windHalf) {
+      uint16_t n = _noise;
+      n ^= n << 7;
+      n ^= n >> 9;
+      n ^= n << 8;
+      _noise = n;
+      int16_t white = (int16_t)(int8_t)(n >> 8) << 3;
+      _windLow += mulShr8(white - _windLow, _windCutoff.value);
+      _windRumble += mulShr8(_windLow - _windRumble, 16);   // >> 4, without a shift loop
+      int16_t wind = mulShr8(_windLow - _windRumble, _windAmp);
+      mix += (_windOut + wind) >> 1;
+      _windOut = wind;
+    } else {
+      mix += _windOut;
     }
   }
-  chimes <<= 1;
+
+  // Chimes.
+  int16_t chimes = 0;
+  if(_layers & LAYER_CHIMES) {
+    // Written out per voice, not looped: with a fixed voice the compiler
+    // reaches its fields by address instead of through a pointer
+    // (~60 cycles a voice instead of ~100).
+    static_assert(CHIME_VOICES == 2, "chime voices are unrolled");
+    chimes = chimeSample(_chime[0]) + chimeSample(_chime[1]);
+    mix += chimes;
+  }
 
   // Echo of the chimes, running at 1/8 rate: averages 8 samples in, holds
-  // the delayed sample out through a one-pole smoother.
-  _echoSum += chimes >> 3;
-  if(++_echoPhase == ECHO_DECIMATION) {
-    _echoPhase = 0;
-    int8_t delayed = _echo[_echoIndex];
-    int16_t in = (_echoSum >> 3) + mulShr8(delayed, _echoFeedback);
-    if(in > 127) {
-      in = 127;
-    } else if(in < -127) {
-      in = -127;
+  // the delayed sample out through a one-pole smoother. Stored as chimes / 4
+  // in 8 bits.
+  if(_layers & LAYER_ECHO) {
+    _echoSum += mulShr8(chimes, 32);   // >> 3, without a shift loop
+    if(++_echoPhase == ECHO_DECIMATION) {
+      _echoPhase = 0;
+      int8_t delayed = _echo[_echoIndex];
+      int16_t in = (_echoSum >> 2) + mulShr8(delayed, _echoFeedback);
+      if(in > 127) {
+        in = 127;
+      } else if(in < -127) {
+        in = -127;
+      }
+      _echo[_echoIndex] = in;
+      _echoIndex = (_echoIndex + 1) & (ECHO_LENGTH - 1);
+      _echoSum = 0;
+      _echoTarget = (int16_t)delayed << 2;
     }
-    _echo[_echoIndex] = in;
-    _echoIndex = (_echoIndex + 1) & (ECHO_LENGTH - 1);
-    _echoSum = 0;
-    _echoTarget = (int16_t)delayed << 3;
+    _echoOut += mulShr8(_echoTarget - _echoOut, 32);
+    mix += mulShr8(_echoOut, _echoWet);
   }
-  _echoOut += (_echoTarget - _echoOut) >> 3;
-  int16_t echo = mulShr8(_echoOut, _echoWet);
 
-  int16_t mix = pad + wind + chimes + echo;
-  return mulShr8(mix, _master);
+  mix = mulShr8(mix, _master);
+  if(mix > SOUNDSCAPE_PEAK) {
+    mix = SOUNDSCAPE_PEAK;
+  } else if(mix < -SOUNDSCAPE_PEAK) {
+    mix = -SOUNDSCAPE_PEAK;
+  }
+  return mix;
+}
+
+uint8_t Soundscape::getLayers() const {
+  return _layers;
+}
+
+void Soundscape::setLayers(uint8_t layers) {
+  _layers = layers & LAYER_ALL;
 }
 
 uint8_t Soundscape::getParam(uint8_t id) const {

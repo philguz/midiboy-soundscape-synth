@@ -93,9 +93,31 @@ loop) takes ~36 %, so ~620 cycles of wall time per sample remain for synthesis w
   since the interrupt takes 28 % of all time). That's ~7 of these oscillators, so every layer
   must be lean. Possible savings if needed: dither random numbers in asm (~30 per sample).
 
-### Step 3: Soundscape engine, one layer at a time ⬜ (`Soundscape.*`, `Scales.*` 🟡)
+### Step 3: Soundscape engine, one layer at a time 🟡 (`Soundscape.*`, `Scales.*`)
 Measure CPU after each layer.
+- [x] Sketch (the main `.ino` for now): the engine with each layer switchable (A on its
+      row), its main parameter on ←→, B new scene, LEVEL at max. Meters as in step 2
+      plus PK (peak |sample|, ceiling 511) and CL (clipped samples). Starts with the pad
+      only. Now 10.7 KB flash and 1009 B RAM; still only Timer0 and UART interrupts.
+- [x] Fixes before the first run: the filter feedback used `255 + cutoff` instead of
+      Mozzi's `255 − cutoff` (feedback up to ~2.0, runaway), and its 32-bit multiply is
+      now 16×8. Levels rescaled so the mix fits ±512 and the sum is clipped there.
+- [x] First hardware run, all layers, DENSITY up: CYC 1417, DRP 999 (overload). Counted from
+      the disassembly (CPU cycles per sample, before the UART interrupt's ~360): pad 229,
+      chimes 250 (2 ringing), wind 93, echo/mix/dither 144, encoder 199, meter/loop ~60.
+- [x] CPU cuts: `SawOsc` (24-bit phase, the top byte is the sample, no table) for the pad,
+      `SineOsc` (16-bit phase, own 256-aligned sine table, < 1 cent from 260 Hz up) for the
+      chimes, chime voices unrolled (fields by address, not via a pointer), int16 shift
+      loops replaced by multiplies, wind at half rate (cutoff stays < 1.3 kHz). Pad 164,
+      chimes 144, wind ~60 on average. No function calls in the audio path.
+- [x] Meter fixes: % from CYC (the core's `micros()` runs 6.25 % slow at 20 MHz: it
+      multiplies by integer 64/20 = 3), MX = worst batch, DRP = dropouts since A or B.
+- [x] Loop fix: dropouts in time with the screen at 86 % load. `fillAudio()` made at most
+      32 samples a call, which at that load gains the ring only ~4 samples, less than a
+      row draw drains. It now refills the ring completely (timed in 32-sample batches).
+- [x] On hardware, all layers, DENSITY up: **CYC 1117 (87 %), MX 1277, DRP 0, PK 476, CL 0.**
 - [ ] 3a: Pad: 3 detuned saws, chord random walk in a scale, glide, resonant lowpass.
+      Listen and read AUDIO / CYC / PK on hardware.
 - [ ] 3b: Wind: xorshift noise, moving lowpass, gusts.
 - [ ] 3c: Chimes: 2 voices × 2 sine partials, random strikes, decay.
 - [ ] 3d: Echo: 512 B line at 1/8 rate (~260 ms), feedback.
