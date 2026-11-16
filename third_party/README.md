@@ -1,7 +1,7 @@
 # Third-party code
 
-This directory holds reusable parts of the two libraries that this project used
-up to step 3. The parts are kept for later porting.
+This directory holds reusable parts of the two libraries that early versions of
+this project used. The parts are kept for later porting.
 
 **Important:** The build doesn't compile anything in this directory. The sketch
 builds only the files under `MidiboySoundscape/`.
@@ -56,10 +56,10 @@ replaces:
 *   **Fixed-point types.** `Oscil`, `Line`, `Smooth`, `MetaOscil`, and
     `mozzi_midi.h` use the FixMath types `UFix` and `SFix`. The rest of the
     code needs only `mozzi_fixmath.h`, which defines types such as `Q16n16`.
-*   **Resource budget.** At the end of step 3, with all layers on, the following
-    resources were free:
+*   **Resource budget.** With all layers on and melody mode in place, the
+    following resources are free:
     *   About 160 of 1280 CPU cycles per sample.
-    *   About 18 KB of flash memory.
+    *   About 16 KB of flash memory, or more with a short melody table.
     *   About 1 KB of RAM.
 *   **Per-sample code.** Mozzi's generic classes are often slower than a
     hand-tuned AVR version. For example, `ResonantFilter` takes about twice the

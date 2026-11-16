@@ -34,8 +34,8 @@ enum LayerBit : uint8_t {
   LAYER_ALL = 15
 };
 
-// Peak of next(): +-512, i.e. -12 dB of the 12-bit range, since the line
-// input clips above that (see PLAN.md, step 1).
+// Peak of next(): +-511, i.e. -12 dB of the 12-bit range, since the line
+// input clips above that (see PLAN.md, design decisions).
 #define SOUNDSCAPE_PEAK 511
 
 // Oscillators. Both take a phase step from noteStep() (a full cycle is
@@ -147,7 +147,6 @@ class Soundscape {
     // Holding stops chord changes; everything else keeps drifting.
     bool isHeld() const;
     void setHeld(bool held);
-
 
     // Root pitch class, 0 = C.
     uint8_t getRoot() const;

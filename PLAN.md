@@ -2,9 +2,8 @@
 
 Midiboy Soundscape is a random soundscape generator for the Blokas Midiboy (ATmega328P at
 20 MHz). It sends audio out of the DIN MIDI OUT port, and a DIN-to-jack adapter carries
-it to a line input. The project follows the conventions of `../Sequencer`: a sketch folder
-with `src/`, `.vscode/arduino.json`, an `arduino-cli` build into `Build/`, and upload over
-USBasp.
+it to a line input. The project is a sketch folder with `src/`, built with `arduino-cli`
+into `Build/` and uploaded over USBasp.
 
 This document records the design decisions and the roadmap. For the figures behind them,
 see [MEASUREMENTS.md](MEASUREMENTS.md).
@@ -23,7 +22,7 @@ see [MEASUREMENTS.md](MEASUREMENTS.md).
 | The mix peaks at −12 dB of full scale. | Full scale clips the test line input. A cable attenuator would keep more SNR, but isn't built yet (see [Roadmap](#roadmap)). |
 | No Mozzi. | Only a few small pieces of Mozzi were still in use, and its power-of-two sample rate needed a pitch correction. Reusable Mozzi and FixMath code is kept, unbuilt, in `third_party/`. |
 | The sketch uses `MidiboyDisplay` and `MidiboyInput` directly, without Arduboy2 or the `Midiboy` global. | This avoids the 1 KB frame buffer, and `Serial` is never linked, so the UART interrupt vector stays free. |
-| No EEPROM use. | The EEPROM holds the Sequencer's pattern slots on the same device. |
+| No EEPROM use. | Other sketches on the same device keep data there, such as a sequencer's pattern slots. |
 | No USB MIDI while audio plays. | The V-USB interrupt outranks the UART and blocks for tens of microseconds, so frames would be missed. |
 
 ### Lessons from development
@@ -53,7 +52,7 @@ see [MEASUREMENTS.md](MEASUREMENTS.md).
 - Melody mode: `tools/mid2melody.py` converts a MIDI file into a melody table that plays on
   a loop. Without a converted file, a built-in original phrase plays.
 - Optional CPU and dropout meter (`SHOW_METER`).
-- [README](README.md) and [measurements](MEASUREMENTS.md).
+- [README](README.md), [measurements](MEASUREMENTS.md), and an MIT [license](LICENSE).
 - Layers tuned by ear on hardware, each alone through `PLAY_LAYERS` in the sketch. The
   echo's wet level now goes up to 1.0 instead of 0.47, because the 1/8-rate line made it
   barely audible. With every parameter at maximum, the mix doesn't clip audibly.
@@ -63,5 +62,5 @@ see [MEASUREMENTS.md](MEASUREMENTS.md).
 - Build the cable attenuator and filter, then raise the level in code:
   tip → 3.3 kΩ → node (1 kΩ in parallel with 33 nF to ground) → 4.7 kΩ → 4.7 nF to
   ground → line input.
-- Save settings, in an EEPROM area that doesn't collide with the Sequencer's slots.
+- Save settings, in an EEPROM area that doesn't collide with other sketches' data.
 - Add layers, if the CPU allows.

@@ -27,7 +27,8 @@ static const uint8_t CHIME_INTERVAL_DS[PARAM_MAX + 1] PROGMEM = {
   0, 200, 140, 100, 75, 55, 42, 33, 26, 20, 16, 12, 9, 7, 5, 4
 };
 
-// Upper-partial ratios for the chimes, 8.8 fixed point: bell, octave, twelfth.
+// Upper-partial ratios for the chimes, 8.8 fixed point: bell (x2.76), octave,
+// twelfth, bell (x2.52).
 static const uint16_t CHIME_RATIOS[] PROGMEM = { 707, 512, 768, 645 };
 
 // One sample of a chime voice. Silent voices cost nothing.

@@ -13,7 +13,8 @@ Features:
 - A new random scene at every start-up and every time you press **A**.
 - Melody mode, which plays a melody on a loop. You can convert your own MIDI file with
   `tools/mid2melody.py`.
-- No EEPROM use, so the Sequencer's saved patterns stay intact.
+- No EEPROM use, so data that other sketches saved there, such as sequencer patterns,
+  stays intact.
 
 ## How it works
 
@@ -112,16 +113,20 @@ For all options, run `python tools/mid2melody.py -h`.
 
 ## Set up the development environment
 
-Set up the toolchain as for the [Sequencer](../Sequencer/README.md#development-setup):
-
-1. Install Arduino IDE 2.x or a standalone `arduino-cli`.
-1. Add the Blokas board package URL:
+1. Install Arduino IDE 2.x or a standalone
+   [`arduino-cli`](https://arduino.github.io/arduino-cli/).
+1. Add the Blokas board package URL. In the IDE, it goes under **File > Preferences >
+   Additional boards manager URLs**:
    `https://blokas.io/midiboy/package_blokas_labs_index.json`.
-1. Install **Blokas AVR Boards** 1.0.6.
+1. In the Boards Manager, install **Blokas AVR Boards**. The project was developed
+   against version 1.0.6.
 1. Select the **Midiboy** board (`Blokas:avr:midiboy`).
 
 The sketch uses only the `MidiboyDisplay` and `MidiboyInput` libraries from the board
 package.
+
+The commands below assume `arduino-cli` is on your `PATH`. Arduino IDE 2.x includes one
+in `<IDE install folder>/resources/app/node_modules/arduino-ide-extension/build/`.
 
 ### Build
 
@@ -136,15 +141,22 @@ the Blokas libraries `SH1106.cpp` and `usbmidi_vusb.cpp`, and are harmless.
 
 ### Flash the Midiboy
 
-1. Put the Midiboy into bootloader mode. It appears on USB as a USBasp programmer. For
-   details, see the [Sequencer README](../Sequencer/README.md#deployment-flashing-the-midiboy).
-1. Run:
+1. Put the Midiboy into bootloader mode and connect it over USB. In bootloader mode, it
+   appears as a USBasp programmer (VID `16C0`, PID `05DC`). On Windows, the USBasp needs
+   a libusb or WinUSB driver, which you can install with [Zadig](https://zadig.akeo.ie/).
+1. [Build](#build) the sketch, then run:
 
    ```sh
-   arduino-cli upload -b Blokas:avr:midiboy -p usb --input-dir Build MidiboySoundscape
+   arduino-cli upload -b Blokas:avr:midiboy -p usb -P usbasp --input-dir Build MidiboySoundscape
    ```
 
-Flashing replaces the sketch on the device, such as the Sequencer.
+   A successful upload prints nothing. If the upload can't find the USBasp, the Midiboy
+   has left bootloader mode. Enter it again and repeat the upload.
+
+In the IDE, **Sketch > Upload Using Programmer** does the same, with **USBasp** as the
+programmer.
+
+Flashing replaces the sketch on the device, but keeps the bootloader.
 
 ### Debug
 
@@ -182,6 +194,11 @@ so all code other than the `.ino` file is under `src/`.
 
 ## License
 
-The project's own code doesn't have a license yet. `third_party/` contains Mozzi code
-under LGPL-2.1 or later, and FixMath code under LGPL-3.0. For details, see
-[third_party/README.md](third_party/README.md).
+The project's own code is under the [MIT License](LICENSE).
+
+Some parts are derived from [Mozzi](https://github.com/sensorium/Mozzi) and stay under
+LGPL-2.1-or-later: the multiply and the sine table in `src/dsp/Dsp.*`, and the resonant
+filter in `src/engine/Soundscape.*`. They are marked in the source.
+
+`third_party/` isn't built. It contains Mozzi code under LGPL-2.1-or-later, and FixMath
+code under LGPL-3.0. For details, see [third_party/README.md](third_party/README.md).

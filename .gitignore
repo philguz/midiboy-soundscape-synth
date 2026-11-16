@@ -15,3 +15,6 @@ desktop.ini
 
 # Melody converted from a local MIDI file
 MidiboySoundscape/src/melody/MelodyLocal.h
+
+# Python
+__pycache__/

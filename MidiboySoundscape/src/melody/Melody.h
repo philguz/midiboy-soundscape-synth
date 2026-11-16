@@ -1,6 +1,6 @@
 #pragma once
 
-// The start-up melody. tools/mid2melody.py writes MelodyLocal.h (git-ignored)
+// The melody for MELODY mode. tools/mid2melody.py writes MelodyLocal.h (git-ignored)
 // from a MIDI file; without it, the original phrase in MelodyDefault.h plays.
 // Include from one .cpp only: the table is defined here.
 #if __has_include("MelodyLocal.h")
