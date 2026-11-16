@@ -1,4 +1,4 @@
-# Midiboy Soundscape
+# Midiboy Soundscape Synth
 
 Midiboy Soundscape turns the [Blokas Midiboy](https://blokas.io/midiboy) into a random
 ambient soundscape generator. It makes audio, not MIDI: the sound comes out of the DIN
