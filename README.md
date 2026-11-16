@@ -154,8 +154,9 @@ Flashing replaces the sketch on the device, such as the Sequencer.
     The budget is 1280. Above about 1150, too little time is left for the screen.
   - `D` is the number of dropouts since start-up or since you last pressed **A**. It
     should stay at 0.
-- To hear or measure one layer alone, turn the others off with
-  `Soundscape::setLayers()`.
+- To hear or measure one layer alone, set `PLAY_LAYERS` in `MidiboySoundscape.ino`, for
+  example to `LAYER_CHIMES` or `LAYER_CHIMES | LAYER_ECHO`. Set it back to `LAYER_ALL`
+  afterwards.
 - `Serial` isn't available, because the audio uses the UART. Use the screen for output.
 
 The audio path has a tight CPU budget. Keep function calls and 32-bit math out of

@@ -54,7 +54,7 @@ Peak level of each layer before the master volume:
 | Pad, depending on **TONE** | ±120 to ±350 | 200 | Simulation |
 | Wind at **WIND** 15 | ±420 | 100 | Estimate |
 | Chimes | ±380 | 150 | Estimate |
-| Echo at **ECHO** 15 | ±450 | 80 | Estimate |
+| Echo at **ECHO** 15 | ±508, the delay line's clamp | 170 | Calculation and estimate |
 
 ## Pitch accuracy
 

@@ -348,8 +348,9 @@ void Soundscape::updateControl() {
 }
 
 // Levels before the master, worst case / typical: pad +-350 / 200 (simulated),
-// wind +-420 / 100 (WIND 15), chimes +-380 / 150, echo +-450 / 80 (ECHO 15).
-// Those peaks almost never line up, so the sum is clipped, not scaled down.
+// wind +-420 / 100 (WIND 15), chimes +-380 / 150, echo +-508 (its clamp) / 170
+// (ECHO 15). Those peaks almost never line up, so the sum is clipped, not
+// scaled down; with everything at 15 no clipping was heard on hardware.
 int16_t Soundscape::next() {
   int16_t mix = 0;
 

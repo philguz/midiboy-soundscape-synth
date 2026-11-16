@@ -54,18 +54,9 @@ see [MEASUREMENTS.md](MEASUREMENTS.md).
   a loop. Without a converted file, a built-in original phrase plays.
 - Optional CPU and dropout meter (`SHOW_METER`).
 - [README](README.md) and [measurements](MEASUREMENTS.md).
-
-### In progress: tune the layers by ear
-
-On hardware, listen to each layer and adjust it. Use `Soundscape::setLayers()` to hear a
-layer alone, and the meter to check its CPU cost.
-
-1. Pad: 3 detuned saws, a chord random walk in the scale, glide, and a resonant lowpass
-   filter.
-2. Wind: xorshift noise, a moving lowpass filter, and gusts.
-3. Chimes: 2 voices with 2 sine partials each, random strikes, and decay.
-4. Echo: a 512-byte delay line at 1/8 rate (about 260 ms), with feedback.
-5. Check the mix levels and clipping with every parameter at maximum.
+- Layers tuned by ear on hardware, each alone through `PLAY_LAYERS` in the sketch. The
+  echo's wet level now goes up to 1.0 instead of 0.47, because the 1/8-rate line made it
+  barely audible. With every parameter at maximum, the mix doesn't clip audibly.
 
 ### Later
 
