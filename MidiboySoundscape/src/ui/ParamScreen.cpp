@@ -4,8 +4,7 @@
 
 #define SCREEN_WIDTH 128
 #define CHAR_WIDTH 6      // 5x7 glyph + 1 column of space
-#define TITLE_ROW 0
-#define FIRST_PARAM_ROW 1
+#define TITLE_ROW PARAM_MODE
 #define FLASH_MS 150
 
 // Pixel columns. The display's page bytes have bit 7 at the top, matching
@@ -17,6 +16,7 @@
 #define BAR_DOT_BITS 0x10
 
 static const char PARAM_NAMES[PARAM_COUNT][8] PROGMEM = {
+  "MODE",   // not drawn: the title row shows the mode instead
   "MOOD", "DENSITY", "DRIFT", "TONE", "WIND", "ECHO", "LEVEL"
 };
 
@@ -50,7 +50,7 @@ void ParamScreen::setSelected(uint8_t param) {
 }
 
 void ParamScreen::markParam(uint8_t param) {
-  _dirtyRows |= 1 << (FIRST_PARAM_ROW + param);
+  _dirtyRows |= 1 << param;
 }
 
 void ParamScreen::markTitle() {
@@ -99,7 +99,7 @@ bool ParamScreen::drawNext() {
   if(row == TITLE_ROW) {
     drawTitle();
   } else {
-    drawParam(row - FIRST_PARAM_ROW);
+    drawParam(row);
   }
   return true;
 }
@@ -108,14 +108,18 @@ void ParamScreen::drawTitle() {
   _shownRoot = _engine.getRoot();
   _shownHeld = _engine.isHeld();
 
+  bool selected = _selected == PARAM_MODE;
+  bool melody = _engine.getParam(PARAM_MODE) == MODE_MELODY;
+
   beginRow(TITLE_ROW);
   if(_meterOn) {
-    drawChar('C', false);
+    drawChar('C', selected);
     drawNumber(_meterCycles, 4);
     drawText_P(PSTR(" D"), false);
     drawNumber(_meterDropouts, 3);
   } else {
-    drawText_P(PSTR("SOUNDSCAPE"), false);
+    // Inverted when selected, like a parameter name.
+    drawText_P(melody ? PSTR("MELODY    ") : PSTR("SOUNDSCAPE"), selected);
   }
   _display.drawSpace(2 * CHAR_WIDTH - (_x - 10 * CHAR_WIDTH), false);
   _x = 12 * CHAR_WIDTH;
@@ -125,7 +129,7 @@ void ParamScreen::drawTitle() {
     drawChar(' ', false);
   }
   drawChar(' ', false);
-  if(_shownHeld) {
+  if(_shownHeld && !melody) {
     drawText_P(PSTR("HOLD"), true);
   } else {
     drawText_P(PSTR("    "), false);
@@ -137,7 +141,7 @@ void ParamScreen::drawTitle() {
 
 void ParamScreen::drawParam(uint8_t param) {
   bool selected = param == _selected;
-  beginRow(FIRST_PARAM_ROW + param);
+  beginRow(param);
 
   // Name, padded to 7 characters; inverted when selected.
   const char* name = PARAM_NAMES[param];

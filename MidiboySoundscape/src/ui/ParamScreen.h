@@ -8,10 +8,12 @@
 // 1 KB of RAM for audio), and only one changed row per drawNext() call, so
 // the main loop can keep the audio ring fed in between.
 //
-// Row 0:    SOUNDSCAPE  D#  HOLD *
+// Row n draws parameter n:
+// Row 0:    SOUNDSCAPE  D#  HOLD *   MODE: SOUNDSCAPE or MELODY, root, hold,
+//                                    a flash on every bell strike
 // Rows 1-7: NAME     [bar or scale name]  value
 //
-// With the meter on, "SOUNDSCAPE" becomes "C1113 D  0": CPU cycles per
+// With the meter on, the mode name becomes "C1113 D  0": CPU cycles per
 // sample and dropouts (see the sketch).
 class ParamScreen {
   public:

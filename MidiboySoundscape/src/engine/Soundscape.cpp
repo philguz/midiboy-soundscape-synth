@@ -1,8 +1,18 @@
 #include "Soundscape.h"
 #include "Scales.h"
 #include "../audio/UartAudioOut.h"
+#include "../melody/Melody.h"
+
+#define MELODY_OFF 0xFFFF
+// Melody bells: octave partial, decay time constant 2^7 ticks (~1 s).
+#define MELODY_RATIO 512
+#define MELODY_DECAY_SHIFT 7
+// Pad glide while the melody plays: 2^3 ticks (~65 ms) instead of ~0.5 s.
+#define MELODY_GLIDE_SHIFT 3
+#define SCENE_GLIDE_SHIFT 6
 
 static const uint8_t DEFAULT_PARAMS[PARAM_COUNT] = {
+  MODE_SCAPE,
   0,    // MOOD: penta minor
   6,    // DENSITY
   6,    // DRIFT
@@ -74,7 +84,9 @@ void Soundscape::begin(uint32_t seed) {
   _layers = LAYER_ALL;
   _held = false;
   _strikeCount = 0;
-  _nextChime = 0;
+  _melodyRow = MELODY_OFF;
+  _melodyWait = 0;
+  _padGlideShift = SCENE_GLIDE_SHIFT;
   _chimeTicks = CONTROL_HZ * 2;
 
   for(uint8_t i = 0; i < PAD_VOICES; i++) {
@@ -123,7 +135,7 @@ void Soundscape::begin(uint32_t seed) {
   _echoWet = 0;
   _master = 0;
 
-  newScene();
+  newScene();   // plays the melody in melody mode
   // Start every pad voice on its note instead of gliding in from 0 Hz.
   for(uint8_t i = 0; i < PAD_VOICES; i++) {
     _padStep[i] = _padTargetStep[i];
@@ -131,6 +143,11 @@ void Soundscape::begin(uint32_t seed) {
 }
 
 void Soundscape::newScene() {
+  if(_params[PARAM_MODE] == MODE_MELODY) {
+    playMelody();
+    return;
+  }
+  stopMelody();
   _root = 36 + Rng::below(12);
   _chordDegree = Rng::below(Scales::length(_params[PARAM_MOOD]));
   setChordTargets();
@@ -171,24 +188,94 @@ void Soundscape::nextChord() {
 }
 
 void Soundscape::strikeChime() {
-  ChimeVoice& voice = _chime[_nextChime];
-  _nextChime = (_nextChime + 1) % CHIME_VOICES;
-
   uint8_t scale = _params[PARAM_MOOD];
   uint8_t length = Scales::length(scale);
   // Degrees across two octaves, starting an octave above the pad's top.
   uint8_t note = Scales::note(scale, _root + 12, length + Rng::below(length * 2));
-  uint32_t step = noteStep(note);
   uint16_t ratio = pgm_read_word(&CHIME_RATIOS[Rng::below(4)]);
+  strikeNote(note, 150 + Rng::below(106), ratio, 6 + Rng::below(3));
+}
 
+// Strikes the quieter voice, so a ringing note is cut only by a newer one.
+void Soundscape::strikeNote(uint8_t note, uint8_t level, uint16_t ratio, uint8_t decayShift) {
+  ChimeVoice& voice = _chime[0].envelope <= _chime[1].envelope ? _chime[0] : _chime[1];
+  uint32_t step = noteStep(note);
+  // The envelope and its level byte change together, at control rate, which
+  // never runs inside next(): no torn reads.
   voice.partial1.setPhase(0);
   voice.partial2.setPhase(0);
   voice.partial1.setStep(step);
   voice.partial2.setStep((step >> 8) * ratio);
-  voice.envelope = (uint16_t)(150 + Rng::below(106)) << 8;
-  voice.amp = voice.envelope >> 8;
-  voice.decayShift = 6 + Rng::below(3);
+  voice.envelope = (uint16_t)level << 8;
+  voice.amp = level;
+  voice.decayShift = decayShift;
   _strikeCount++;
+}
+
+// Root, octave and fifth above, bass folded into the pad's range (36..47).
+void Soundscape::setPadBass(uint8_t note) {
+  while(note < 36) {
+    note += 12;
+  }
+  while(note > 47) {
+    note -= 12;
+  }
+  _padTargetStep[0] = noteStep(note);
+  _padTargetStep[1] = noteStep(note + 12);
+  _padTargetStep[2] = noteStep(note + 19);
+}
+
+void Soundscape::playMelody() {
+  // The scene carries on in the melody's key.
+  _params[PARAM_MOOD] = MELODY_MOOD < SCALE_COUNT ? MELODY_MOOD : 0;
+  _root = 36 + MELODY_ROOT;
+  _chordDegree = 0;
+  setChordTargets();
+  _melodyRow = 0;
+  // Counted down before the first row is read, in stepMelody().
+  _melodyWait = (uint16_t)pgm_read_byte(&MELODY_DATA[0]) + 1;
+  _padGlideShift = MELODY_GLIDE_SHIFT;
+}
+
+void Soundscape::stopMelody() {
+  if(_melodyRow == MELODY_OFF) {
+    return;
+  }
+  _melodyRow = MELODY_OFF;
+  _padGlideShift = SCENE_GLIDE_SHIFT;
+  // The scene starts gently: a few seconds before the first random chime
+  // and chord change.
+  _chimeTicks = CONTROL_HZ * 3;
+  _chordTicks = CONTROL_HZ * 6;
+}
+
+// Once per control tick while the melody plays: plays every row that is due.
+void Soundscape::stepMelody() {
+  if(--_melodyWait != 0) {
+    return;
+  }
+  while(true) {
+    const uint8_t* row = &MELODY_DATA[_melodyRow * MELODY_ROW_SIZE];
+    uint8_t note = pgm_read_byte(&row[1]);
+    if(note & MELODY_NOTE_PAD) {
+      setPadBass(note & 0x7F);
+    } else if(note != MELODY_NOTE_REST) {
+      strikeNote(note, pgm_read_byte(&row[2]), MELODY_RATIO, MELODY_DECAY_SHIFT);
+    }
+    if(++_melodyRow >= MELODY_ROWS) {
+      // Again from the top (the table ends with a ring-out rest).
+      _melodyRow = 0;
+      _melodyWait = pgm_read_byte(&MELODY_DATA[0]);
+      if(_melodyWait == 0) {
+        _melodyWait = 1;
+      }
+      return;
+    }
+    _melodyWait = pgm_read_byte(&row[MELODY_ROW_SIZE]);
+    if(_melodyWait != 0) {
+      return;
+    }
+  }
 }
 
 // Ticks between Wander steps: 15 at DRIFT 0, 0 at DRIFT 15.
@@ -199,7 +286,10 @@ uint8_t Soundscape::driftPeriod() const {
 void Soundscape::updateControl() {
   uint8_t period = driftPeriod();
 
-  if(!_held) {
+  bool melody = _melodyRow != MELODY_OFF;
+  if(melody) {
+    stepMelody();
+  } else if(!_held) {
     nextChord();
   }
 
@@ -207,7 +297,7 @@ void Soundscape::updateControl() {
   // its own slow detune of up to +-0.3% (~5 cents) for a chorus beat.
   for(uint8_t i = 0; i < PAD_VOICES; i++) {
     int32_t diff = (int32_t)(_padTargetStep[i] - _padStep[i]);
-    _padStep[i] += diff >> 6;
+    _padStep[i] += diff >> _padGlideShift;
     _padDetune[i].tick(0, 24, period + 8);
     int8_t wobble = (int8_t)_padDetune[i].value - 12;
     _pad[i].setStep(_padStep[i] + (int32_t)(_padStep[i] >> 12) * wobble);
@@ -235,7 +325,9 @@ void Soundscape::updateControl() {
     voice.amp = voice.envelope >> 8;
   }
   uint8_t density = _params[PARAM_DENSITY];
-  if(density != 0) {
+  if(melody) {
+    // Random chimes wait; stopMelody() sets when they start again.
+  } else if(density != 0) {
     if(--_chimeTicks == 0) {
       strikeChime();
       // Next strike after 25..175% of the mean interval.
@@ -346,6 +438,9 @@ uint8_t Soundscape::getParam(uint8_t id) const {
 }
 
 uint8_t Soundscape::getParamMax(uint8_t id) const {
+  if(id == PARAM_MODE) {
+    return MODE_MELODY;
+  }
   return id == PARAM_MOOD ? SCALE_COUNT - 1 : PARAM_MAX;
 }
 
@@ -358,7 +453,14 @@ void Soundscape::setParam(uint8_t id, uint8_t value) {
     return;
   }
   _params[id] = value;
-  if(id == PARAM_MOOD) {
+  if(id == PARAM_MODE) {
+    if(value == MODE_MELODY) {
+      playMelody();
+    } else {
+      stopMelody();
+    }
+  } else if(id == PARAM_MOOD && _melodyRow == MELODY_OFF) {
+    // (While the melody plays, the pad follows its bass instead.)
     // Keep the chord degree inside the new scale and glide the pad there.
     uint8_t length = Scales::length(value);
     if(_chordDegree > (int8_t)length) {

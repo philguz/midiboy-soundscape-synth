@@ -153,6 +153,15 @@ Measure CPU after each layer.
 ### Step 5: Docs and polish ⬜
 - [ ] README in the Sequencer's style: hardware, wiring and adapter, controls, build,
       flashing.
+- [x] Start-up melody (extra): `tools/mid2melody.py` turns a MIDI file into a PROGMEM
+      table (`src/melody/MelodyLocal.h`, git-ignored; without it the original phrase in
+      `MelodyDefault.h` plays). Bells play notes ≥ G3 (two voices, the quieter one is
+      re-struck), lower notes steer the pad's bass on the beat, the scene then carries
+      on in the melody's key (guessed, or `--root`/`--minor`). Control rate only: no
+      per-sample cost. 3 bytes per note.
+- [x] Mode switch: the title row is a parameter (MODE, index 0): SOUNDSCAPE is the
+      generative scene (start-up default), MELODY loops the melody (A restarts it);
+      back in SOUNDSCAPE the scene continues in the melody's key. Select it with UP/DOWN, flip with LEFT/RIGHT.
 - [ ] Later or optional: save settings (in an EEPROM area that doesn't collide with the
       Sequencer, if wanted), MIDI-clock-free features, more layers if CPU allows.
 

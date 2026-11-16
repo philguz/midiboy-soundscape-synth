@@ -3,8 +3,9 @@
 #include <avr/pgmspace.h>
 #include "../dsp/Dsp.h"
 
-// User parameters, in screen order.
+// User parameters, in screen order. MODE is drawn as the title row.
 enum ParamId : uint8_t {
+  PARAM_MODE,      // MODE_SCAPE or MODE_MELODY
   PARAM_MOOD,      // scale, 0..SCALE_COUNT-1
   PARAM_DENSITY,   // how often chimes strike, 0 = never
   PARAM_DRIFT,     // how fast everything wanders and the chords change
@@ -15,7 +16,12 @@ enum ParamId : uint8_t {
   PARAM_COUNT
 };
 
-// Range of every parameter but MOOD.
+enum Mode : uint8_t {
+  MODE_SCAPE,    // the generative soundscape
+  MODE_MELODY    // the melody (src/melody/) on a loop
+};
+
+// Range of every parameter but MODE and MOOD.
 #define PARAM_MAX 15
 
 // Layers, as bits for setLayers(). All on by default; switching one off
@@ -119,7 +125,8 @@ class Soundscape {
   public:
     void begin(uint32_t seed);
 
-    // New root and chord, right away.
+    // Soundscape mode: new root and chord, right away.
+    // Melody mode: the melody from the top.
     void newScene();
 
     // Every CONTROL_PERIOD samples.
@@ -141,6 +148,7 @@ class Soundscape {
     bool isHeld() const;
     void setHeld(bool held);
 
+
     // Root pitch class, 0 = C.
     uint8_t getRoot() const;
     // Goes up by one on every chime strike, for the screen.
@@ -154,7 +162,9 @@ class Soundscape {
     int8_t _chordDegree;
     uint16_t _chordTicks;   // until the next chord
     uint16_t _chimeTicks;   // until the next strike
-    uint8_t _nextChime;
+    uint16_t _melodyRow;     // next row; MELODY_OFF when not playing
+    uint16_t _melodyWait;    // control ticks until it
+    uint8_t _padGlideShift;  // glide time constant, 2^shift ticks
     uint8_t _strikeCount;
 
     SawOsc _pad[PAD_VOICES];
@@ -190,5 +200,14 @@ class Soundscape {
     void setChordTargets();
     void nextChord();
     void strikeChime();
+    void strikeNote(uint8_t note, uint8_t level, uint16_t ratio, uint8_t decayShift);
+    void setPadBass(uint8_t note);
+    void stepMelody();
+    // From the top, on a loop: the scene switches to the melody's key, the
+    // pad follows its bass, the bells play its notes, and random chimes and
+    // chord changes wait.
+    void playMelody();
+    // Back to the soundscape, carrying on in the melody's key.
+    void stopMelody();
     uint8_t driftPeriod() const;
 };

@@ -12,3 +12,6 @@ desktop.ini
 
 # Local MIDI files (convert with tools/mid2melody.py; not committed)
 *.mid
+
+# Melody converted from a local MIDI file
+MidiboySoundscape/src/melody/MelodyLocal.h

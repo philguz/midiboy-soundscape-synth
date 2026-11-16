@@ -1,16 +1,24 @@
 // Midiboy Soundscape: random soundscape generator, audio out of DIN MIDI OUT.
 //
+// Two modes, chosen on the title row:
+//   SOUNDSCAPE  the generative soundscape. Starts in this mode, with a
+//               random scene.
+//   MELODY      a melody on a loop (src/melody/; tools/mid2melody.py makes
+//               one from a MIDI file). Switching back to SOUNDSCAPE carries
+//               on in the melody's key.
+//
 // Buttons:
-//   UP / DOWN     select a parameter
-//   LEFT / RIGHT  change it (repeats while held)
-//   A             new scene: new root and chord
+//   UP / DOWN     select the mode (title row) or a parameter
+//   LEFT / RIGHT  change it (parameters repeat while held)
+//   A             soundscape: new scene (new root and chord);
+//                 melody: back to the top
 //   B             hold: stop chord changes (everything else keeps drifting)
 //
-// Screen: a title row (root note, HOLD, a * flash on every chime strike),
+// Screen: a title row (mode, root note, HOLD, a * flash on every bell strike),
 // then MOOD, DENSITY, DRIFT, TONE, WIND, ECHO and LEVEL.
 //
 // With SHOW_METER 1 the title row starts with "C1113 D  0" instead of the
-// name, updated 4 times a second:
+// mode, updated 4 times a second:
 //   C  CPU cycles per sample making audio (synthesis plus the UartAudioOut
 //      encoder, including the UART interrupt meanwhile), averaged over the
 //      last 250 ms. The budget is 1280; the rest is for the UI.
@@ -119,6 +127,10 @@ static void changeParam(uint8_t id, int8_t delta) {
   }
   soundscape.setParam(id, value);
   screen.markParam(id);
+  if(id == PARAM_MODE) {
+    // The melody sets its own key.
+    screen.markParam(PARAM_MOOD);
+  }
 }
 
 static void handleButton(MidiboyInput::Button button) {
@@ -144,6 +156,7 @@ static void handleButton(MidiboyInput::Button button) {
       break;
     case MidiboyInput::BUTTON_A:
       soundscape.newScene();
+      screen.markParam(PARAM_MOOD);
       dropouts = 0;
       break;
     case MidiboyInput::BUTTON_B:
