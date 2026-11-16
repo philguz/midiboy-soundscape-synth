@@ -1,38 +1,29 @@
 // Midiboy Soundscape: random soundscape generator, audio out of DIN MIDI OUT.
 //
-// Step 3 sketch: the Soundscape engine with each layer switchable, so every
-// layer can be heard alone and its CPU cost measured. Starts with the pad only.
-//
 // Buttons:
-//   UP / DOWN     select a row (marked >)
-//   LEFT / RIGHT  change the selected row's value:
-//                   MOOD  scale          PAD   TONE      WIND  WIND level
-//                   CHIME DENSITY        ECHO  ECHO      DRIFT DRIFT
-//   A             on a layer row: switch the layer on / off
-//   B             new scene (new root and chord)
+//   UP / DOWN     select a parameter
+//   LEFT / RIGHT  change it (repeats while held)
+//   A             new scene: new root and chord
+//   B             hold: stop chord changes (everything else keeps drifting)
 //
-// Screen, meters updated 4 times a second:
-//   CYC    CPU cycles per sample making audio (synthesis plus the
-//          UartAudioOut encoder, including the UART interrupt firing
-//          meanwhile), averaged over the last 250 ms. The budget is 1280.
-//   MX     the worst batch (4+ samples) in those 250 ms: chime bursts,
-//          control ticks.
-//   %      CYC as a share of the budget. What's left is for the UI.
-//          (Not timed with micros(): at 20 MHz the Arduino core's micros()
-//          runs 6.25% slow, since it multiplies by 64 / 20 = 3.)
-//   DRP    dropouts (the ring ran dry) since the last A or B press.
-//   PK     highest |sample| since the last update. 511 = the -12 dB ceiling.
-//   CL     samples clipped at the ceiling since the last update.
+// Screen: a title row (root note, HOLD, a * flash on every chime strike),
+// then MOOD, DENSITY, DRIFT, TONE, WIND, ECHO and LEVEL.
 //
-// LEVEL is at maximum here, so PK shows the worst case.
+// With SHOW_METER 1 the title row starts with "C1113 D  0" instead of the
+// name, updated 4 times a second:
+//   C  CPU cycles per sample making audio (synthesis plus the UartAudioOut
+//      encoder, including the UART interrupt meanwhile), averaged over the
+//      last 250 ms. The budget is 1280; the rest is for the UI.
+//   D  dropouts (the ring ran dry) since start-up or the last A press.
 
 #include <MidiboyDisplay.h>
 #include <MidiboyInput.h>
-#include <MidiboyFonts.h>
 #include "src/audio/UartAudioOut.h"
 #include "src/dsp/Dsp.h"
 #include "src/engine/Soundscape.h"
-#include "src/engine/Scales.h"
+#include "src/ui/ParamScreen.h"
+
+#define SHOW_METER 0
 
 // fillAudio() refills the ring completely, timing it in batches of at most
 // AUDIO_BATCH_MAX samples so a batch stays below Timer1's 65536-cycle wrap.
@@ -44,54 +35,30 @@
 // synthesis ever overloads the CPU.
 #define AUDIO_BATCHES_MAX 8
 
-#define STATUS_MS 250
-#define CHAR_WIDTH 6
-
-enum Row : uint8_t {
-  ROW_MOOD = 0,
-  ROW_PAD = 1,
-  ROW_WIND = 2,
-  ROW_CHIME = 3,
-  ROW_ECHO = 4,
-  ROW_LOAD = 5,
-  ROW_FILL = 6,
-  ROW_DRIFT = 7
-};
-
-// Rows the cursor visits, top to bottom.
-static const uint8_t SELECTABLE[] = { ROW_MOOD, ROW_PAD, ROW_WIND, ROW_CHIME, ROW_ECHO, ROW_DRIFT };
-#define SELECTABLE_COUNT sizeof(SELECTABLE)
-
-static const char NOTE_NAMES[12][3] PROGMEM = {
-  "C ", "C#", "D ", "D#", "E ", "F ", "F#", "G ", "G#", "A ", "A#", "B "
-};
+#define METER_MS 250
+#define BUTTON_REPEAT_MS 150
 
 static MidiboyDisplay display;
 static MidiboyInput input;
 static Soundscape soundscape;
-
-static uint8_t cursor;
+static ParamScreen screen(display, soundscape);
 
 static uint16_t dropouts;
-static uint16_t peak;
-static uint16_t shownPeak;
-static uint16_t clips;
-static uint16_t shownClips;
 static uint32_t busyCycles;
 static uint16_t busySamples;
-static uint16_t maxCycles;
-static uint8_t shownLoad;
-static uint16_t shownCycles;
-static uint16_t shownMaxCycles;
-static unsigned long lastStatusMs;
-static uint8_t dirtyRows = 0xFF;
-static uint8_t shownRoot = 0xFF;
+static unsigned long lastMeterMs;
 
 static uint8_t controlCountdown = 1;
 
+// Not cleared at reset: random-ish after power-up, and a value from the
+// last run's generator after a reset, so every start sounds different
+// without using the EEPROM.
+static uint32_t noinitSeed __attribute__((section(".noinit")));
+
 // --- Audio -------------------------------------------------------------------
 
-// Timer1 is free. Free-running at the CPU clock, it counts cycles; one batch is well under its 65536 wrap.
+// Timer1 is free. Free-running at the CPU clock, it counts cycles; one batch
+// is well under its 65536 wrap. It also times button presses for the seed.
 static void startCycleCounter() {
   TCCR1A = 0;
   TCCR1B = _BV(CS10);
@@ -107,28 +74,12 @@ static uint8_t fillBatch() {
       controlCountdown = CONTROL_PERIOD;
       soundscape.updateControl();
     }
-    int16_t sample = soundscape.next();
-    UartAudioOut::write(sample);
-    uint16_t level = sample < 0 ? -sample : sample;
-    if(level > peak) {
-      peak = level;
-    }
-    if(level >= SOUNDSCAPE_PEAK) {
-      clips++;
-    }
+    UartAudioOut::write(soundscape.next());
     count++;
   }
   if(count != 0) {
-    uint16_t cycles = (uint16_t)(TCNT1 - start);
-    busyCycles += cycles;
+    busyCycles += (uint16_t)(TCNT1 - start);
     busySamples += count;
-    // Small batches are mostly loop overhead, so they don't count for MX.
-    if(count >= 4) {
-      uint16_t perSample = cycles / count;
-      if(perSample > maxCycles) {
-        maxCycles = perSample;
-      }
-    }
   }
   return count;
 }
@@ -147,134 +98,11 @@ static void fillAudio() {
   }
 }
 
-// Turns the window's counts into the numbers on screen.
-// CPU cycles per sample at 15625 Hz.
-#define CYCLE_BUDGET (F_CPU / UART_AUDIO_SAMPLE_RATE)
-
 static void updateMeter() {
-  shownCycles = busySamples != 0 ? (uint16_t)(busyCycles / busySamples) : 0;
-  uint16_t load = (uint32_t)shownCycles * 100 / CYCLE_BUDGET;
-  shownLoad = load > 999 ? 999 : load;
-  shownMaxCycles = maxCycles;
-  maxCycles = 0;
+  uint16_t cycles = busySamples != 0 ? (uint16_t)(busyCycles / busySamples) : 0;
   busyCycles = 0;
   busySamples = 0;
-  shownPeak = peak;
-  peak = 0;
-  shownClips = clips;
-  clips = 0;
-}
-
-// --- Screen ------------------------------------------------------------------
-
-static uint8_t textX;
-
-static void drawChar(char c, bool inverse) {
-  if(c < ' ' || c > '~') {
-    c = '?';
-  }
-  const uint8_t* glyph = &MIDIBOY_FONT_5X7::DATA_P[(uint16_t)(c - ' ') * MIDIBOY_FONT_5X7::WIDTH];
-  display.drawBitmap_P(glyph, MIDIBOY_FONT_5X7::WIDTH, inverse);
-  display.drawSpace(1, inverse);
-  textX += CHAR_WIDTH;
-}
-
-static void drawText_P(const char* text) {
-  char c;
-  while((c = pgm_read_byte(text++)) != 0) {
-    drawChar(c, false);
-  }
-}
-
-// Right-aligned in `width` characters.
-static void drawNumber(uint16_t value, uint8_t width) {
-  char digits[6];
-  uint8_t count = 0;
-  do {
-    digits[count++] = '0' + value % 10;
-    value /= 10;
-  } while(value > 0);
-  for(uint8_t i = count; i < width; i++) {
-    drawChar(' ', false);
-  }
-  while(count > 0) {
-    drawChar(digits[--count], false);
-  }
-}
-
-static void drawLayer(const char* name, uint8_t layer, uint8_t param) {
-  drawText_P(name);
-  drawText_P((soundscape.getLayers() & layer) ? PSTR(" ON  ") : PSTR(" OFF "));
-  drawNumber(soundscape.getParam(param), 2);
-}
-
-static void drawRow(uint8_t row) {
-  display.setDrawPosition(0, row);
-  textX = 0;
-  drawChar(SELECTABLE[cursor] == row ? '>' : ' ', false);
-  switch(row) {
-    case ROW_MOOD:
-      drawText_P(PSTR("MOOD  "));
-      drawText_P(Scales::name(soundscape.getParam(PARAM_MOOD)));
-      drawChar(' ', false);
-      drawText_P(NOTE_NAMES[soundscape.getRoot()]);
-      break;
-    case ROW_PAD:
-      drawLayer(PSTR("PAD  "), LAYER_PAD, PARAM_TONE);
-      drawText_P(PSTR(" TONE"));
-      break;
-    case ROW_WIND:
-      drawLayer(PSTR("WIND "), LAYER_WIND, PARAM_WIND);
-      break;
-    case ROW_CHIME:
-      drawLayer(PSTR("CHIME"), LAYER_CHIMES, PARAM_DENSITY);
-      drawText_P(PSTR(" DENS"));
-      break;
-    case ROW_ECHO:
-      drawLayer(PSTR("ECHO "), LAYER_ECHO, PARAM_ECHO);
-      break;
-    case ROW_LOAD:
-      drawText_P(PSTR("CYC"));
-      drawNumber(shownCycles, 4);
-      drawText_P(PSTR(" MX"));
-      drawNumber(shownMaxCycles, 5);
-      drawNumber(shownLoad, 4);
-      drawChar('%', false);
-      break;
-    case ROW_FILL:
-      drawText_P(PSTR("DRP"));
-      drawNumber(dropouts, 4);
-      drawText_P(PSTR(" PK"));
-      drawNumber(shownPeak, 4);
-      drawText_P(PSTR(" CL"));
-      drawNumber(shownClips > 999 ? 999 : shownClips, 3);
-      break;
-    case ROW_DRIFT:
-      drawText_P(PSTR("DRIFT       "));
-      drawNumber(soundscape.getParam(PARAM_DRIFT), 2);
-      if(soundscape.isHeld()) {
-        drawText_P(PSTR(" HOLD"));
-      }
-      break;
-  }
-  display.drawSpace(128 - textX, false);
-}
-
-// At most one row per call, so the audio ring gets refilled in between.
-static void drawNextRow() {
-  if(dirtyRows == 0) {
-    return;
-  }
-  uint8_t row = 0;
-  while(!(dirtyRows & (1 << row))) {
-    row++;
-  }
-  dirtyRows &= ~(1 << row);
-  drawRow(row);
-}
-
-static void markRow(uint8_t row) {
-  dirtyRows |= 1 << row;
+  screen.showMeter(cycles, dropouts);
 }
 
 // --- Controls ----------------------------------------------------------------
@@ -290,80 +118,58 @@ static void changeParam(uint8_t id, int8_t delta) {
     value++;
   }
   soundscape.setParam(id, value);
-}
-
-// The parameter and layer behind a row, if any.
-static bool rowTarget(uint8_t row, uint8_t& param, uint8_t& layer) {
-  layer = 0;
-  switch(row) {
-    case ROW_MOOD:  param = PARAM_MOOD; return true;
-    case ROW_PAD:   param = PARAM_TONE;    layer = LAYER_PAD;    return true;
-    case ROW_WIND:  param = PARAM_WIND;    layer = LAYER_WIND;   return true;
-    case ROW_CHIME: param = PARAM_DENSITY; layer = LAYER_CHIMES; return true;
-    case ROW_ECHO:  param = PARAM_ECHO;    layer = LAYER_ECHO;   return true;
-    case ROW_DRIFT: param = PARAM_DRIFT; return true;
-  }
-  return false;
+  screen.markParam(id);
 }
 
 static void handleButton(MidiboyInput::Button button) {
-  uint8_t row = SELECTABLE[cursor];
-  uint8_t param;
-  uint8_t layer;
-  bool hasTarget = rowTarget(row, param, layer);
-
+  uint8_t selected = screen.getSelected();
   switch(button) {
-    case MidiboyInput::BUTTON_UP:
-      if(cursor > 0) {
-        cursor--;
-        markRow(row);
-        markRow(SELECTABLE[cursor]);
+    // The library's BUTTON_UP / BUTTON_DOWN are swapped relative to the
+    // physical buttons on this device (checked on hardware).
+    case MidiboyInput::BUTTON_DOWN:
+      if(selected > 0) {
+        screen.setSelected(selected - 1);
       }
       break;
-    case MidiboyInput::BUTTON_DOWN:
-      if(cursor < SELECTABLE_COUNT - 1) {
-        cursor++;
-        markRow(row);
-        markRow(SELECTABLE[cursor]);
+    case MidiboyInput::BUTTON_UP:
+      if(selected < PARAM_COUNT - 1) {
+        screen.setSelected(selected + 1);
       }
       break;
     case MidiboyInput::BUTTON_LEFT:
+      changeParam(selected, -1);
+      break;
     case MidiboyInput::BUTTON_RIGHT:
-      if(hasTarget) {
-        changeParam(param, button == MidiboyInput::BUTTON_LEFT ? -1 : 1);
-        markRow(row);
-      }
+      changeParam(selected, 1);
       break;
     case MidiboyInput::BUTTON_A:
-      if(layer != 0) {
-        soundscape.setLayers(soundscape.getLayers() ^ layer);
-        markRow(row);
-      }
+      soundscape.newScene();
       dropouts = 0;
       break;
     case MidiboyInput::BUTTON_B:
-      soundscape.newScene();
-      markRow(ROW_MOOD);
-      dropouts = 0;
+      soundscape.setHeld(!soundscape.isHeld());
       break;
     default:
-      break;
+      return;
   }
+  // Button timing to the CPU cycle is real entropy; keep it across resets.
+  Rng::stir(TCNT1 ^ ((uint32_t)micros() << 16));
+  noinitSeed = Rng::next();
 }
 
 // --- Main --------------------------------------------------------------------
 
 void setup() {
   display.begin();
-  display.clearScreen();
   input.begin();
-  input.setButtonRepeatMs(150);
-
-  soundscape.begin(micros() ^ ((uint32_t)TCNT0 << 16));
-  soundscape.setLayers(LAYER_PAD);
-  soundscape.setParam(PARAM_LEVEL, PARAM_MAX);
-
+  input.setButtonRepeatMs(BUTTON_REPEAT_MS);
   startCycleCounter();
+
+  soundscape.begin(noinitSeed ^ micros() ^ TCNT1);
+  noinitSeed = Rng::next();
+
+  screen.setMeter(SHOW_METER);
+  screen.begin();
 
   // Last: from here on the loop must keep the ring fed.
   UartAudioOut::begin();
@@ -381,18 +187,12 @@ void loop() {
   }
 
   unsigned long now = millis();
-  if(now - lastStatusMs >= STATUS_MS) {
-    lastStatusMs = now;
+  if(now - lastMeterMs >= METER_MS) {
+    lastMeterMs = now;
     updateMeter();
-    markRow(ROW_LOAD);
-    markRow(ROW_FILL);
   }
-  // The root changes on new scenes only; the screen follows.
-  if(soundscape.getRoot() != shownRoot) {
-    shownRoot = soundscape.getRoot();
-    markRow(ROW_MOOD);
-  }
+  screen.poll();
 
   fillAudio();
-  drawNextRow();
+  screen.drawNext();
 }

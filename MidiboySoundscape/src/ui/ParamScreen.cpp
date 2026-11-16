@@ -26,7 +26,8 @@ static const char NOTE_NAMES[12][3] PROGMEM = {
 
 ParamScreen::ParamScreen(MidiboyDisplay& display, Soundscape& engine)
   : _display(display), _engine(engine), _dirtyRows(0), _selected(PARAM_DENSITY), _x(0),
-    _shownRoot(0), _shownHeld(false), _shownStrikes(0), _flashOn(false), _flashStartMs(0) {
+    _shownRoot(0), _shownHeld(false), _shownStrikes(0), _flashOn(false), _flashStartMs(0),
+    _meterOn(false), _meterCycles(0), _meterDropouts(0) {
 }
 
 void ParamScreen::begin() {
@@ -54,6 +55,19 @@ void ParamScreen::markParam(uint8_t param) {
 
 void ParamScreen::markTitle() {
   _dirtyRows |= 1 << TITLE_ROW;
+}
+
+void ParamScreen::setMeter(bool on) {
+  _meterOn = on;
+  markTitle();
+}
+
+void ParamScreen::showMeter(uint16_t cycles, uint16_t dropouts) {
+  _meterCycles = cycles > 9999 ? 9999 : cycles;
+  _meterDropouts = dropouts > 999 ? 999 : dropouts;
+  if(_meterOn) {
+    markTitle();
+  }
 }
 
 void ParamScreen::poll() {
@@ -95,7 +109,14 @@ void ParamScreen::drawTitle() {
   _shownHeld = _engine.isHeld();
 
   beginRow(TITLE_ROW);
-  drawText_P(PSTR("SOUNDSCAPE"), false);
+  if(_meterOn) {
+    drawChar('C', false);
+    drawNumber(_meterCycles, 4);
+    drawText_P(PSTR(" D"), false);
+    drawNumber(_meterDropouts, 3);
+  } else {
+    drawText_P(PSTR("SOUNDSCAPE"), false);
+  }
   _display.drawSpace(2 * CHAR_WIDTH - (_x - 10 * CHAR_WIDTH), false);
   _x = 12 * CHAR_WIDTH;
   const char* note = NOTE_NAMES[_shownRoot];
@@ -135,7 +156,7 @@ void ParamScreen::drawParam(uint8_t param) {
     drawBar(value);
     _display.drawSpace(NUMBER_X - _x, false);
     _x = NUMBER_X;
-    drawNumber(value);
+    drawNumber(value, 2);
   }
   endRow();
 }
@@ -175,11 +196,14 @@ void ParamScreen::drawText_P(const char* text, bool inverse) {
   }
 }
 
-void ParamScreen::drawNumber(uint8_t value) {
-  char text[3];
-  text[0] = value >= 10 ? '0' + value / 10 : ' ';
-  text[1] = '0' + value % 10;
-  text[2] = 0;
+// Right-aligned in `width` characters (at most 5).
+void ParamScreen::drawNumber(uint16_t value, uint8_t width) {
+  char text[6];
+  text[width] = 0;
+  for(int8_t i = width - 1; i >= 0; i--) {
+    text[i] = (value != 0 || i == width - 1) ? '0' + value % 10 : ' ';
+    value /= 10;
+  }
   drawText(text, false);
 }
 

@@ -9,3 +9,6 @@ Build/
 .vs/
 Thumbs.db
 desktop.ini
+
+# Local MIDI files (convert with tools/mid2melody.py; not committed)
+*.mid

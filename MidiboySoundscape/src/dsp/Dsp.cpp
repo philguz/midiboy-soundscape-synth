@@ -31,6 +31,12 @@ namespace Rng {
     x = seed;
   }
 
+  void stir(uint32_t entropy) {
+    x ^= entropy;
+    // (Landing on the all-zero state, which would stick, is a 1 in 2^96 chance.)
+    next();
+  }
+
   uint32_t next() {
     x ^= x << 16;
     x ^= x >> 5;

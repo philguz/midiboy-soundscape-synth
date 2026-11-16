@@ -132,13 +132,23 @@ Measure CPU after each layer.
 - [ ] 3d: Echo: 512 B line at 1/8 rate (~260 ms), feedback.
 - [ ] Mix levels and clipping check at maximum settings. Output peak = −12 dB (±512).
 
-### Step 4: UI ⬜ (`ParamScreen.*` 🟡, `.ino` not written)
-- [ ] Screen: title row (root, HOLD, chime flash) and 7 parameter rows
-      (MOOD, DENSITY, DRIFT, TONE, WIND, ECHO, LEVEL). Draw one row per loop pass.
-- [ ] Buttons: ↑↓ select, ←→ change (repeat), A new scene, B hold.
-- [ ] Main loop: fill the ring (at most 16 samples per pass), then one UI slice. Check
-      that no dropouts happen while drawing.
-- [ ] Random seed without EEPROM (`.noinit` RAM plus button-press timing).
+### Step 4: UI ✅ (`ParamScreen.*`, `.ino`)
+- [x] Screen: a title row (root, HOLD, a `*` flash on each chime strike) and 7 parameter rows
+      (MOOD, DENSITY, DRIFT, TONE, WIND, ECHO, LEVEL): the name, then a 15-step bar and
+      the value, or the scale name for MOOD. One row is drawn per loop pass.
+- [x] Buttons: ↑↓ select, ←→ change (repeats every 150 ms), A new scene, B hold.
+      `MidiboyInput`'s BUTTON_UP / BUTTON_DOWN are swapped relative to the physical
+      buttons on this device, so the sketch swaps them back.
+- [x] Main loop: refill the ring completely (as in step 3, not "at most 16 samples":
+      at high load that's what lets a row be drawn safely), then one UI step.
+- [x] Meter: with `SHOW_METER 1` the title row starts with `C1113 D  0` (cycles per
+      sample, dropouts since start or A) instead of `SOUNDSCAPE`.
+- [x] Random seed without EEPROM: a `.noinit` word (random-ish at power-up, then the
+      last run's generator state after a reset), plus each button press stirs
+      Timer1 (CPU-cycle timing) into the generator. Builds to 10.6 KB flash, 1009 B RAM.
+- [x] On hardware: no dropouts while scrolling and holding ←→ (D stays 0), a
+      different scene on every start, and the chime `*` flashes.
+- [x] `SHOW_METER 0` by default; set it to 1 to bring the meter back.
 
 ### Step 5: Docs and polish ⬜
 - [ ] README in the Sequencer's style: hardware, wiring and adapter, controls, build,

@@ -35,6 +35,8 @@ static inline __attribute__((always_inline)) int16_t mulShr8(int16_t a, uint8_t 
 // Marsaglia's xorshift96, period 2^96 - 1, as Mozzi's xorshift96().
 namespace Rng {
   void seed(uint32_t seed);
+  // Mixes in more entropy (e.g. button timing) without restarting.
+  void stir(uint32_t entropy);
   uint32_t next();
 
   inline uint8_t byte() {

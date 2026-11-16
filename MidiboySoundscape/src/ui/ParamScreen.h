@@ -10,6 +10,9 @@
 //
 // Row 0:    SOUNDSCAPE  D#  HOLD *
 // Rows 1-7: NAME     [bar or scale name]  value
+//
+// With the meter on, "SOUNDSCAPE" becomes "C1113 D  0": CPU cycles per
+// sample and dropouts (see the sketch).
 class ParamScreen {
   public:
     ParamScreen(MidiboyDisplay& display, Soundscape& engine);
@@ -23,6 +26,10 @@ class ParamScreen {
     // Redraw a parameter's row after its value changed.
     void markParam(uint8_t param);
     void markTitle();
+
+    // Show the meter in the title row instead of the name.
+    void setMeter(bool on);
+    void showMeter(uint16_t cycles, uint16_t dropouts);
 
     // Watches the engine for title-row changes (root, hold, chime flash).
     void poll();
@@ -44,6 +51,10 @@ class ParamScreen {
     bool _flashOn;
     unsigned long _flashStartMs;
 
+    bool _meterOn;
+    uint16_t _meterCycles;
+    uint16_t _meterDropouts;
+
     void drawTitle();
     void drawParam(uint8_t param);
 
@@ -52,6 +63,6 @@ class ParamScreen {
     void drawChar(char c, bool inverse);
     void drawText(const char* text, bool inverse);
     void drawText_P(const char* text, bool inverse);
-    void drawNumber(uint8_t value);
+    void drawNumber(uint16_t value, uint8_t width);
     void drawBar(uint8_t value);
 };
