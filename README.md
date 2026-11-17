@@ -25,8 +25,8 @@ quantization noise out of the audio band.
 
 USB MIDI can't run while audio plays, so the Midiboy works as a standalone sound source.
 
-For the design decisions, see [PLAN.md](PLAN.md). For the figures behind them, see
-[MEASUREMENTS.md](MEASUREMENTS.md).
+For the design decisions, see [docs/DESIGN.md](docs/DESIGN.md). For the figures behind them,
+see [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
 
 ## Connect the Midiboy
 
