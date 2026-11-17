@@ -35,7 +35,7 @@ enum LayerBit : uint8_t {
 };
 
 // Peak of next(): +-511, i.e. -12 dB of the 12-bit range, since the line
-// input clips above that (see docs/MEASUREMENTS.md).
+// input clips above that (see docs/DESIGN.md).
 #define SOUNDSCAPE_PEAK 511
 
 // Oscillators. Both take a phase step from noteStep() (a full cycle is

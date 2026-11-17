@@ -1,7 +1,7 @@
 # Measurements
 
 This document lists the measured, simulated, and calculated figures behind the design of
-Midiboy Soundscape.
+Midiboy Soundscape. For the decisions themselves, see [DESIGN.md](DESIGN.md).
 
 Each figure lists its source:
 
