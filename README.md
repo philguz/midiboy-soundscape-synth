@@ -104,6 +104,10 @@ Simple melodies work best. For how the conversion works and its options, see
 - [Measurements](docs/MEASUREMENTS.md): output level, audio quality, pitch accuracy, and
   CPU use.
 
+## Contributions
+
+- Splashscreen design by Alena Vlasova.
+
 ## License
 
 [MIT](LICENSE), except for a few parts derived from [Mozzi](https://github.com/sensorium/Mozzi),
